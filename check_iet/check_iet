@@ -1,0 +1,192 @@
+#!/usr/bin/perl
+#
+#    check_iet nagios plugin
+#    Copyright (C) 2012 Nicolas Limage
+#
+#    This program is free software: you can redistribute it and/or modify
+#    it under the terms of the GNU General Public License as published by
+#    the Free Software Foundation, either version 3 of the License, or
+#    (at your option) any later version.
+#
+#    This program is distributed in the hope that it will be useful,
+#    but WITHOUT ANY WARRANTY; without even the implied warranty of
+#    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#    GNU General Public License for more details.
+#
+#    You should have received a copy of the GNU General Public License
+#    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+#
+use strict;
+use warnings;
+#use lib '/usr/lib/nagios/plugins/lib';
+use Nagios::Plugin;
+
+my $np = Nagios::Plugin->new(
+	shortname => 'IET',
+	usage => "usage: check_iet",
+	plugin => 'IET',
+	version => '1.0'
+);
+
+#----------------------------------------
+# Option Parsing
+#----------------------------------------
+
+$np->add_arg(
+	spec => 'warntargets|t=s',
+	help => "-s, --warnsess=INTEGER:INTEGER\n   description\n"
+              . " See http://nagiosplug.sourceforge.net/developer-guidelines.html#THRESHOLDFORMAT "
+              . "for the threshold format. ",
+);
+
+$np->add_arg(
+	spec => 'crittargets|T=s',
+	help => "-S, --critsess=INTEGER:INTEGER\n   description\n"
+              . " See http://nagiosplug.sourceforge.net/developer-guidelines.html#THRESHOLDFORMAT "
+              . "for the threshold format. ",
+);
+
+$np->add_arg(
+	spec => 'warnluns|l=s',
+	help => "-s, --warnsess=INTEGER:INTEGER\n   description\n"
+              . " See http://nagiosplug.sourceforge.net/developer-guidelines.html#THRESHOLDFORMAT "
+              . "for the threshold format. ",
+);
+
+$np->add_arg(
+	spec => 'critluns|L=s',
+	help => "-S, --critsess=INTEGER:INTEGER\n   description\n"
+              . " See http://nagiosplug.sourceforge.net/developer-guidelines.html#THRESHOLDFORMAT "
+              . "for the threshold format. ",
+);
+
+$np->add_arg(
+	spec => 'warnsessions|s=s',
+	help => "-s, --warnsess=INTEGER:INTEGER\n   description\n"
+              . " See http://nagiosplug.sourceforge.net/developer-guidelines.html#THRESHOLDFORMAT "
+              . "for the threshold format. ",
+);
+
+$np->add_arg(
+	spec => 'critsessions|S=s',
+	help => "-S, --critsess=INTEGER:INTEGER\n   description\n"
+              . " See http://nagiosplug.sourceforge.net/developer-guidelines.html#THRESHOLDFORMAT "
+              . "for the threshold format. ",
+);
+
+$np->add_arg(
+	spec => 'warnconnections|c=s',
+	help => "-s, --warnsess=INTEGER:INTEGER\n   description\n"
+              . " See http://nagiosplug.sourceforge.net/developer-guidelines.html#THRESHOLDFORMAT "
+              . "for the threshold format. ",
+);
+
+$np->add_arg(
+	spec => 'critconnections|C=s',
+	help => "-S, --critsess=INTEGER:INTEGER\n   description\n"
+              . " See http://nagiosplug.sourceforge.net/developer-guidelines.html#THRESHOLDFORMAT "
+              . "for the threshold format. ",
+);
+
+$np->getopts();
+
+# Safety Net
+alarm $np->opts->timeout;
+
+sub log_debug($) { print((shift) . "\n"); }
+
+my $fdv;
+my $fds;
+open($fdv, '<', '/proc/net/iet/volume') or $np->nagios_die("unable to open /proc/net/iet/volume: $!");
+open($fds, '<', '/proc/net/iet/session') or $np->nagios_die("unable to open /proc/net/iet/session: $!");
+
+my $data;
+my $last_tid = 0;
+my $was_lun = 0;
+
+my $count = { sessions => 0, connections => 0, targets => 0, luns => 0 };
+
+foreach (<$fdv>)
+{
+	if (/^\s*(#|$)/)
+	{
+#		log_debug("(parsing iet data) skip comment or empty line");
+	}
+	elsif (/^\s*tid:(\d+)\s*name:(\S+)\s*$/)
+	{
+#		log_debug("(parsing iet data) target tid=$1 iqn=$2");
+		$count->{targets}++;
+
+		if (!$was_lun && $last_tid ne 0)
+		{
+			$np->add_message(WARNING, "no lun for target $last_tid");
+		}
+
+		$was_lun = 0;
+		$last_tid = $1;
+	}
+	elsif (/^\s*lun:(\d+)\s+state:(\d+)\s+iotype:(\S+)\s+iomode:(\S+)\s+blocks:(\d+)\s+blocksize:(\d+)\s+path:(\S+)\s*$/)
+	{
+#		log_debug("(parsing iet data) lun target_id=$last_tid lun_id=$1 state=$2 iotype=$3 iomode=$4 block=$5 blocksize=$6 path=$7");
+		$count->{luns}++;
+		$was_lun = 1;
+	}
+}
+
+foreach (<$fds>)
+{
+	if (/^\s*(#|$)/)
+	{
+#		log_debug("(parsing iet data) skip comment or empty line");
+	}
+	elsif (/^\s*tid:(\d+)\s*name:(\S+)\s*$/)
+	{
+#		log_debug("(parsing iet data) target tid=$1 iqn=$2");
+		$count->{targets}++;
+		$last_tid = $1;
+	}
+	elsif (/^\s*sid:(\d+)\s+initiator:(\S+)$/)
+	{
+		$count->{sessions}++;
+	}
+	elsif (/\s*cid:(\d+)\s+ip:(\S+)\s+state:(\S+)\s+/)
+	{
+		$count->{connections}++;
+	}
+}
+
+close($fdv);
+close($fds);
+
+#----------------------------------------
+# Health Checks
+#----------------------------------------
+my $code;
+
+$code = $np->check_threshold( check => $count->{targets}, warning => $np->opts->warntargets, critical => $np->opts->crittargets);
+$np->add_message($code, sprintf("%s targets", $count->{targets}) ) if ($code != OK);
+
+$code = $np->check_threshold( check => $count->{luns}, warning => $np->opts->warnluns, critical => $np->opts->critluns);
+$np->add_message($code, sprintf("%s luns", $count->{luns}) ) if ($code != OK);
+
+$code = $np->check_threshold( check => $count->{sessions}, warning => $np->opts->warnsessions, critical => $np->opts->critsessions);
+$np->add_message($code, sprintf("%s sessions", $count->{sessions}) ) if ($code != OK);
+
+$code = $np->check_threshold( check => $count->{connections}, warning => $np->opts->warnconnections, critical => $np->opts->critconnections);
+$np->add_message($code, sprintf("%s connections", $count->{connections}) ) if ($code != OK);
+
+#----------------------------------------
+# Performance Data
+#----------------------------------------
+
+$np->add_perfdata(label => "targets", value => $count->{targets});
+$np->add_perfdata(label => "luns", value => $count->{luns});
+$np->add_perfdata(label => "sessions", value => $count->{sessions});
+$np->add_perfdata(label => "connections", value => $count->{connections});
+
+#----------------------------------------
+# Status Checks
+#----------------------------------------
+$np->add_message(OK, sprintf("%s targets, %s luns, %s sessions, %s connections", $count->{targets}, $count->{luns}, $count->{sessions}, $count->{connections}));
+my ($exit_code, $exit_message) = $np->check_messages(join => ', ');
+$np->nagios_exit($exit_code, $exit_message);

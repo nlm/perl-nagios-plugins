@@ -1,0 +1,195 @@
+#!/usr/bin/perl
+#
+#    check_zpool nagios plugin
+#    Copyright (C) 2012 Nicolas Limage
+#
+#    This program is free software: you can redistribute it and/or modify
+#    it under the terms of the GNU General Public License as published by
+#    the Free Software Foundation, either version 3 of the License, or
+#    (at your option) any later version.
+#
+#    This program is distributed in the hope that it will be useful,
+#    but WITHOUT ANY WARRANTY; without even the implied warranty of
+#    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#    GNU General Public License for more details.
+#
+#    You should have received a copy of the GNU General Public License
+#    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+#
+use 5.008.009;
+use strict;
+use warnings;
+#use lib '/usr/lib/nagios/plugins/lib';
+use Nagios::Plugin;
+
+my $np = Nagios::Plugin->new(
+	shortname => 'ZPOOL',
+	usage => "usage: check_zpool [-p <pool_name>] [-w %warning] [-c %critical]",
+	plugin => 'ZPOOL',
+	version => '1.1.1'
+);
+
+#----------------------------------------
+# Option Parsing
+#----------------------------------------
+
+$np->add_arg(
+	spec => 'pool|p=s',
+	help => "-p, --pool=<pool_name>\n   pool to check",
+	required => 1,
+);
+
+$np->add_arg(
+	spec => 'warning|w=s',
+	help => "-w, --warning=INTEGER:INTEGER\n   warning threshold for zpool space usage % (default: 90)\n"
+              . " See http://nagiosplug.sourceforge.net/developer-guidelines.html#THRESHOLDFORMAT "
+              . "for the threshold format. ",
+	default => ':90',
+);
+
+$np->add_arg(
+	spec => 'critical|c=s',
+	help => "-c, --critical=INTEGER:INTEGER\n   critical threshold for zpool space usage % (default: 95)\n"
+              . " See http://nagiosplug.sourceforge.net/developer-guidelines.html#THRESHOLDFORMAT "
+              . "for the threshold format. ",
+	default => ':95',
+);
+
+$np->add_arg(
+	spec => 'duration|d=i',
+	help => "-d, --duration=INTEGER\n"
+		. "   duration of zpool io stats harvesting in ms\n"
+		. "   0 disabled the check (default: 0)\n",
+	default => 0,
+);
+
+$np->getopts();
+
+# Safety Net
+alarm $np->opts->timeout;
+
+my $pool = $np->opts->pool;
+die "malformed pool name" if ($pool !~ /^[a-z0-9-_:.]$/i);
+
+foreach (`LANG=C zpool list -H $pool`)
+{
+	if (/^(\S+)\s+(\S+)\s+(\S+)\s+(\S+)\s+(\S+)%\s+(\S+)x\s+(\S+)\s+(\S+)$/)
+	{
+		print if $np->opts->verbose > 2;
+		my ($pool_name, $size, $alloc, $free, $cap, $dedus, $health, $altroot) = ($1, $2, $3, $4, $5, $6, $7, $8);
+		my $code = $np->check_threshold(
+			check => $cap,
+			warning => $np->opts->warning,
+			critical => $np->opts->critical,
+		);
+
+		$np->add_message(($health eq 'ONLINE' ? OK : CRITICAL), "pool '$pool_name' is $health");
+		$np->add_message($code, "pool space $cap% used");
+		$np->add_perfdata(label => "space used", min => 0, uom => '%', value => $cap);
+	}
+	else
+	{
+		$np->nagios_die("malformed 'zpool list' output");
+	}
+}
+
+$np->nagios_die("error executing zpool list") if (${^CHILD_ERROR_NATIVE} != 0);
+
+my $read = 0;
+foreach (`LANG=C zpool status $pool`)
+{
+	if (/^$/)
+	{
+		$read = 0;
+	}
+	if ($read)
+	{
+		print if $np->opts->verbose > 2;
+		if (/^\t(\s*)(\S+)\s+([A-Z]+)\s+(\S+)\s+(\S+)\s+(\S+)\s*(.+)*$/)
+		{
+			my ($disk_name, $status, $read_err, $write_err, $cksum_err, $ext_status) = ($2, $3, $4, $5, $6, $7);
+
+			my $what = ((length($1) > 0) ? ($disk_name =~ /^(raid|mirror)/ ? 'group' : 'disk' ) : 'pool');
+
+			$np->add_message('CRITICAL', "$what '$disk_name' is $status") if ($status ne 'ONLINE' and $what ne 'pool');
+			$np->add_message('WARNING', "$what '$disk_name' has $read_err read errors") if ($read_err != 0);
+			$np->add_message('WARNING', "$what '$disk_name' has $write_err write errors") if ($write_err != 0);
+			$np->add_message('WARNING', "$what '$disk_name' has $cksum_err cksum errors") if ($cksum_err != 0);
+		}
+		elsif(/^\t(cache|logs|spares)$/)
+		{
+		}
+		elsif (/^\t(\s*)(\S+)\s+(AVAIL)\s*$/)
+		{
+		}
+		else
+		{
+			$np->nagios_die("malformed 'zpool status' output");
+		}
+	}
+	elsif (/NAME\s+STATE\s+READ\s+WRITE\s+CKSUM/)
+	{
+		$read = 1;
+	}
+
+}
+
+sub base_value($)
+{
+	my $value = shift;
+	my $units = {
+		'' => 0,
+		k => 10,
+		M => 20,
+		G => 30,
+		T => 40,
+		P => 50,
+		E => 60,
+	};
+
+	if ($value =~ /^(\d+)(\.(\d+))*([KMGTPE]?)$/i)
+	{
+		return $1 * (2 ** $units->{$4});
+	}
+
+	return undef;
+}
+
+my $duration = $np->opts->duration;
+my $iteration = 0;
+my $iostats = {};
+
+if ($duration >= 1)
+{
+	foreach (`LANG=C zpool iostat $duration 2`)
+	{
+		print if $np->opts->verbose > 2;
+		if (/^(\S+)\s+([\d\.]+[KMGTPE]?)\s+([\d\.]+[kMGTPE]?)\s+(\d+)\s+(\d+)\s+([\d\.]+[KMGTPE]?)\s+([\d\.]+[kMGTPE]?)$/i)
+		{
+			my ($pool, $alloc, $free, $oprd, $opwr, $bwrd, $bwwr) = ($1, $2, $3, $4, $5, $6, $7 );
+
+			$iostats->{$pool} = {
+				oprd => $oprd,
+				opwr => $opwr,
+				bwrd => $bwrd,
+				bwwr => $bwwr,
+			}
+		}
+	}
+
+	$np->nagios_die("error executing zpool iostat") if (${^CHILD_ERROR_NATIVE} != 0);
+
+	foreach my $pool (keys %$iostats)
+	{
+		$np->add_perfdata(label => "ops read", min => 0, value => $iostats->{$pool}->{oprd});
+		$np->add_perfdata(label => "ops write", min => 0, value => $iostats->{$pool}->{opwr});
+		$np->add_perfdata(label => "bandwidth read", min => 0, value => base_value($iostats->{$pool}->{bwrd}));
+		$np->add_perfdata(label => "bandwidth write", min => 0, value => base_value($iostats->{$pool}->{bwwr}));
+	}
+}
+
+#----------------------------------------
+# Status Checks
+#----------------------------------------
+my ($exit_code, $exit_message) = $np->check_messages(join => ', ');
+$np->nagios_exit($exit_code, $exit_message);
