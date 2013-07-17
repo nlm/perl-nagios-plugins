@@ -1,0 +1,683 @@
+#!/usr/bin/perl
+#
+#    check_interface nagios plugin
+#    Copyright (C) 2012 Nicolas Limage
+#
+#    This program is free software: you can redistribute it and/or modify
+#    it under the terms of the GNU General Public License as published by
+#    the Free Software Foundation, either version 3 of the License, or
+#    (at your option) any later version.
+#
+#    This program is distributed in the hope that it will be useful,
+#    but WITHOUT ANY WARRANTY; without even the implied warranty of
+#    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#    GNU General Public License for more details.
+#
+#    You should have received a copy of the GNU General Public License
+#    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+#
+use strict;
+use warnings;
+use 5.008;
+#use lib '/usr/lib/nagios/plugins/lib';
+use Nagios::Plugin;
+use Net::SNMP;
+use Data::Dumper;
+
+my $STATEDIR = '/var/lib/centreon/centplugins';
+
+my $OIDS;
+
+my $OIDS32 = {
+	ifDescr => '.1.3.6.1.2.1.2.2.1.2',
+	ifSpeed => '.1.3.6.1.2.1.2.2.1.5',
+	ifHighSpeed => '.1.3.6.1.2.1.31.1.1.1.15',
+	ifAdminStatus => '.1.3.6.1.2.1.2.2.1.7',
+	ifOperStatus => '.1.3.6.1.2.1.2.2.1.8',
+	ifInOctets => '.1.3.6.1.2.1.2.2.1.10',
+	ifInUcastPkts => '.1.3.6.1.2.1.2.2.1.11',
+#	ifInDiscards => '.1.3.6.1.2.1.2.2.1.13',
+#	ifInErrors => '.1.3.6.1.2.1.2.2.1.14',
+	ifOutOctets => '.1.3.6.1.2.1.2.2.1.16',
+	ifOutUcastPkts => '.1.3.6.1.2.1.2.2.1.17',
+#	ifOutDiscards => '.1.3.6.1.2.1.2.2.1.19',
+#	ifOutErrors => '.1.3.6.1.2.1.2.2.1.20',
+};
+
+my $OIDS64 = {
+	ifDescr => '.1.3.6.1.2.1.2.2.1.2',
+	ifSpeed => '.1.3.6.1.2.1.2.2.1.5',
+	ifHighSpeed => '.1.3.6.1.2.1.31.1.1.1.15',
+	ifAdminStatus => '.1.3.6.1.2.1.2.2.1.7',
+	ifOperStatus => '.1.3.6.1.2.1.2.2.1.8',
+	ifInOctets => '.1.3.6.1.2.1.31.1.1.1.6',
+	ifInUcastPkts => '.1.3.6.1.2.1.31.1.1.1.7',
+#	ifInDiscards => '.1.3.6.1.2.1.2.2.1.13',
+#	ifInErrors => '.1.3.6.1.2.1.2.2.1.14',
+	ifOutOctets => '.1.3.6.1.2.1.31.1.1.1.10',
+	ifOutUcastPkts => '.1.3.6.1.2.1.31.1.1.1.11',
+#	ifOutDiscards => '.1.3.6.1.2.1.2.2.1.19',
+#	ifOutErrors => '.1.3.6.1.2.1.2.2.1.20',
+};
+
+my $IFSTATE = {
+	ifAdminStatus => {
+		1 => 'up',
+		2 => 'down',
+		3 => 'testing',
+	},
+	ifOperStatus => {
+		1 => 'up',
+		2 => 'down',
+		3 => 'testing',
+		4 => 'unknown',
+		5 => 'dormant',
+		6 => 'notPresent',
+		7 => 'lowerLayerDown',
+	},
+};
+
+sub unit_value
+{
+	my $value = shift;
+	my $unit = (shift or '');
+	my $multiplier = (shift or 1000);
+	my $digits = (shift or 2);
+	my @symbols = ('', 'k', 'M', 'G', 'T', 'P');
+	my $sidx = 0;
+
+	while ($value >= $multiplier && $sidx < @symbols)
+	{
+		$value /= $multiplier;
+		$sidx++;
+	}
+
+	return sprintf("%.${digits}f%s%s", $value, $symbols[$sidx], $unit);
+}
+
+sub compute_realspeed
+{
+	my $ifinfo = shift;
+
+	if ($ifinfo->{ifSpeed} == 4294967295)
+	{
+		return $ifinfo->{ifHighSpeed} * 1000000;
+	}
+
+	return $ifinfo->{ifSpeed};
+}
+
+sub get_iflist($$)
+{
+	my $np = shift or die;
+	my $snmp_session = shift or die;
+	my $iflist = [];
+
+	my $result = $snmp_session->get_table(-baseoid => $OIDS->{ifDescr});
+	$np->nagios_die($snmp_session->error()) if !defined $result;
+
+	foreach my $ifid (keys %$result)
+	{
+		push @$iflist, $result->{$ifid};
+	}
+
+	#@$iflist = sort @$iflist;
+	return $iflist;
+}
+
+sub sanitize_fname($)
+{
+	my $name = shift;
+	$name =~ s/[^0-9a-z_-]/_/gi;
+	return $name;
+}
+
+sub get_ifid($$$)
+{
+	my $np = shift or die;
+	my $snmp_session = shift or die;
+	my $ifdescr = shift or die;
+
+	my $result = $snmp_session->get_table(-baseoid => $OIDS->{ifDescr});
+	$np->nagios_die('get_ifid: ' . $snmp_session->error()) if !defined $result;
+
+	foreach my $ifid (keys %$result)
+	{
+		if ($result->{$ifid} eq $ifdescr)
+		{
+			$ifid =~ s/$OIDS->{ifDescr}\.//;
+			return $ifid;
+		}
+	}
+
+	return undef;
+}
+
+sub get_ifinfo($$$)
+{
+	my $np = shift or die;
+	my $snmp_session = shift or die;
+	my $ifid = shift or die;
+
+	my $result = $snmp_session->get_request(
+		-varbindlist => [
+			"$OIDS->{ifDescr}.$ifid",
+			"$OIDS->{ifSpeed}.$ifid",
+			"$OIDS->{ifHighSpeed}.$ifid",
+			"$OIDS->{ifAdminStatus}.$ifid",
+			"$OIDS->{ifOperStatus}.$ifid",
+			"$OIDS->{ifInOctets}.$ifid",
+			"$OIDS->{ifInUcastPkts}.$ifid",
+#			"$OIDS->{ifInDiscards}.$ifid",
+#			"$OIDS->{ifInErrors}.$ifid",
+			"$OIDS->{ifOutOctets}.$ifid",
+			"$OIDS->{ifOutUcastPkts}.$ifid",
+#			"$OIDS->{ifOutDiscards}.$ifid",
+#			"$OIDS->{ifOutErrors}.$ifid",
+		]
+	);
+
+	$np->nagios_die('get_ifinfo: ' . $snmp_session->error()) if (!defined $result);
+
+	my $ifinfo = {};
+
+	foreach my $item (keys %$OIDS)
+	{
+		$ifinfo->{$item} = $result->{"$OIDS->{$item}.$ifid"};
+	}
+
+	return $ifinfo;
+}
+
+sub get_cached_ifinfo($$$)
+{
+	my $np = shift or die;
+	my $hostname = shift or die;
+	my $ifdescr = shift or die;
+	my $fd;
+
+	my $datafile = $np->opts->datadir . '/check_interface/' . $hostname . '/' . sanitize_fname($ifdescr) . '.dat';
+	
+	return undef if (!-e $datafile);
+
+	if (!open($fd, '<', $datafile))
+	{
+		$np->nagios_die("unable to open datafile '$datafile': $!");
+	}
+	read($fd, my $content, 8192);
+	close($fd);
+
+	my $data = eval($content);
+	$np->nagios_die("invalid data in datafile '$datafile': $@") if $@;
+	return $data;
+
+	return undef;
+}
+
+sub save_cached_ifinfo($$$$)
+{
+	my $np = shift or die;
+	my $hostname = shift or die;
+	my $ifdescr = shift or die;
+	my $ifinfo = shift or die;
+	my $fd;
+
+	if (! -d ($np->opts->datadir . '/check_interface/' . $hostname))
+	{
+		if (! -d ($np->opts->datadir . '/check_interface'))
+		{
+			mkdir $np->opts->datadir . '/check_interface'
+				or $np->nagios_die($!);
+		}
+		mkdir $np->opts->datadir . '/check_interface/' . $hostname
+			or $np->nagios_die($!);
+	}
+
+	my $datafile = $np->opts->datadir . '/check_interface/' . $hostname . '/' . sanitize_fname($ifdescr) . '.dat';
+	
+	if (!open($fd, '>', $datafile . '.new'))
+	{
+		$np->nagios_die("unable to open datafile '$datafile.new': $!");
+	}
+
+	print $fd Data::Dumper->new([$ifinfo])->Terse(1)->Purity(1)->Dump();
+	close($fd);
+	if (!rename($datafile . '.new', $datafile))
+	{
+		$np->nagios_die("unable to rename datafile '$datafile.new' to '$datafile': $!");
+	}
+}
+
+my $np = Nagios::Plugin->new(
+	shortname => 'INTERFACE',
+	usage => "usage: check_interface <options> -H <host_address> -i <interface>\n   use --help for more info",
+	plugin => 'INTERFACE',
+	version => '1.0b3'
+);
+
+#----------------------------------------
+# Option Parsing
+#----------------------------------------
+
+$np->add_arg(
+	spec => 'hostname|H=s',
+	help => "-H, --hostname=<host_address>\n   Hostname to check",
+	required => 1,
+	default => '127.0.0.1'
+);
+
+$np->add_arg(
+	spec => 'port|p=s',
+	help => "-p, --port=<snmp_port>\n   SNMP port (default: 161)",
+	default => 161,
+);
+
+# IPv4/IPv6
+
+$np->add_arg(
+	spec => 'ipv4|4',
+	help => "-4\n   use IPv4 (default)",
+);
+
+$np->add_arg(
+	spec => 'ipv6|6',
+	help => "-6\n   use IPv6",
+);
+
+# SNMPv1/2
+
+$np->add_arg(
+	spec => 'protocol|P=s',
+	help => "-P, --protocol=[1|2|3]\n   SNMP protocol version ('2c' also accepted)",
+	required => 1,
+	default => 2,
+);
+
+$np->add_arg(
+	spec => 'community|C=s',
+	help => "-C, --community=<snmp_community>\n   SNMP community (SNMP version 1 or 2 only)",
+	required => 1,
+	default => 'public',
+);
+
+# SNMPv3
+
+$np->add_arg(
+	spec => 'username=s',
+	help => "--username=<snmp_username>\n   SNMP username (SNMP version 3)",
+);
+
+$np->add_arg(
+	spec => 'authkey=s',
+	help => "--authkey=<snmp_authkey>\n   SNMP authkey (SNMP version 3)",
+);
+
+$np->add_arg(
+	spec => 'authpassword=s',
+	help => "--authpassord=<snmp_authpassword>\n   SNMP authpassword (SNMP version 3)",
+);
+
+$np->add_arg(
+	spec => 'authprotocol=s',
+	help => "--authprotocol=<snmp_authprotocol>\n   SNMP authprotocol (SNMP version 3)",
+);
+
+$np->add_arg(
+	spec => 'privkey=s',
+	help => "--privkey=<snmp_privkey>\n   SNMP privkey (SNMP version 3)",
+);
+
+$np->add_arg(
+	spec => 'privpassword=s',
+	help => "--privpassword=<snmp_privpassword>\n   SNMP privpassword (SNMP version 3)",
+	default => undef
+);
+
+$np->add_arg(
+	spec => 'privprotocol=s',
+	help => "--privprotocol=<snmp_privprotocol>\n   SNMP privprotocol (SNMP version 3)",
+);
+
+# other
+
+$np->add_arg(
+	spec => 'noperfdata|F',
+	help => "-F, --noperfdata\n   Don't output performance data",
+);
+
+$np->add_arg(
+	spec => 'list|L',
+	help => "-L, --list\n   List available interfaces instead of checking",
+);
+
+$np->add_arg(
+	spec => 'interface|i=s',
+	help => "-i <interface_name>\n   Interface to check (ex: GigabitEthernet0/1)",
+	required => 1
+);
+
+$np->add_arg(
+	spec => 'interfacestatus|s=i',
+	help => "-s, --interfacestatus=<level>\n   Checks if interface is up\n" . 
+	"   level 0 => no check (default)\n" .
+	"   level 1 => critical if interface is admin up, but link is not up\n" .
+	"   level 2 => critical if interface is not admin up",
+	required => 1,
+	default => 0,
+);
+
+$np->add_arg(
+	spec => 'warnifcritical|w',
+	help => "-w, --warnifcritical\n   Returns a WARNING instead of CRITICAL on interface status (default: no)",
+);
+
+$np->add_arg(
+	spec => 'datadir|d=s',
+	help => "-d <directory>, --datadir=<directory>\n   Data directory for persistent performance data (default: $STATEDIR)",
+	required => 1,
+	default => $STATEDIR
+);
+
+$np->add_arg(
+	spec => 'oldcounters|o',
+	help => "-o, --oldcounters\n   Use old 32-bit counters (deprecated) (default: no)",
+);
+
+$np->add_arg(
+	spec => 'wbps|b=s',
+	help => "-b, --wbps=INTEGER:INTEGER\n   warning threshold for traffic (bps)\n"
+              . " See http://nagiosplug.sourceforge.net/developer-guidelines.html#THRESHOLDFORMAT "
+              . "for the threshold format. ",
+);
+
+$np->add_arg(
+	spec => 'cbps|B=s',
+	help => "-B, --cbps=INTEGER:INTEGER\n   critical threshold for traffic (bps)\n"
+              . " See http://nagiosplug.sourceforge.net/developer-guidelines.html#THRESHOLDFORMAT "
+              . "for the threshold format. ",
+);
+
+$np->add_arg(
+	spec => 'wpkts|k=s',
+	help => "-k, --wpkts=INTEGER:INTEGER\n   critical threshold for traffic (pps)\n"
+              . " See http://nagiosplug.sourceforge.net/developer-guidelines.html#THRESHOLDFORMAT "
+              . "for the threshold format. ",
+);
+
+$np->add_arg(
+	spec => 'cpkts|K=s',
+	help => "-K, --cpkts=INTEGER:INTEGER\n   critical threshold for traffic (pps)\n"
+              . " See http://nagiosplug.sourceforge.net/developer-guidelines.html#THRESHOLDFORMAT "
+              . "for the threshold format. ",
+);
+
+$np->add_arg(
+	spec => 'wpctbps|t=s',
+	help => "-t, --wpct=INTEGER:INTEGER\n   critical threshold for link usage (%pps)\n"
+              . " See http://nagiosplug.sourceforge.net/developer-guidelines.html#THRESHOLDFORMAT "
+              . "for the threshold format. ",
+);
+
+$np->add_arg(
+	spec => 'cpctbps|T=s',
+	help => "-T, --cpct=INTEGER:INTEGER\n   critical threshold for link usage (%pps)\n"
+              . " See http://nagiosplug.sourceforge.net/developer-guidelines.html#THRESHOLDFORMAT "
+              . "for the threshold format. ",
+);
+
+$np->getopts();
+
+# Safety Net
+alarm $np->opts->timeout;
+
+#----------------------------------------
+# IP Transport Domain
+#----------------------------------------
+
+my $domain = 'udp4';
+
+if (defined $np->opts->ipv6)
+{
+	if (defined $np->opts->ipv4)
+	{
+		$np->nagios_die('options -4 and -6 are mutually exclusive');
+	}
+	$domain = 'udp6';
+}
+
+#----------------------------------------
+# SNMP Session
+#----------------------------------------
+
+$OIDS = $np->opts->oldcounters ? $OIDS32 : $OIDS64;
+
+my ($snmp_session, $snmp_error);
+
+if ($np->opts->protocol eq '1'
+	|| $np->opts->protocol eq '2'
+	|| $np->opts->protocol eq '2c')
+{
+	($snmp_session, $snmp_error) = Net::SNMP->session(
+		-hostname => $np->opts->hostname,
+		-port => $np->opts->port,
+		-domain => $domain,
+		-version => ($np->opts->protocol eq '2c' ? '2' : $np->opts->protocol),
+		-community => $np->opts->community,
+	);
+}
+elsif ($np->opts->protocol eq '3')
+{
+	($snmp_session, $snmp_error) = Net::SNMP->session(
+		-hostname => $np->opts->hostname,
+		-port => $np->opts->port,
+		-domain => $domain,
+		-version => $np->opts->protocol,
+		-username => $np->opts->username,
+		-authkey => $np->opts->authkey,
+		-authpassword => $np->opts->authpassword,
+		-authprotocol => $np->opts->authprotocol,
+		-privkey => $np->opts->privkey,
+		-privpassword => $np->opts->privpassword,
+		-privprotocol => $np->opts->privprotocol,
+	);
+}
+else
+{
+	$np->nagios_die("invalid snmp protocol");
+}
+
+$np->nagios_die($snmp_error) if (!defined $snmp_session);
+
+#----------------------------------------
+# Interface Listing
+#----------------------------------------
+
+if (defined $np->opts->list)
+{
+	foreach my $if (@{get_iflist($np, $snmp_session)})
+	{
+		print " $if\n";
+	}
+	print "\n";
+	$snmp_session->close();
+	$np->nagios_die('listing mode: only listing interfaces names');
+}
+
+#----------------------------------------
+# Cache Directory
+#----------------------------------------
+
+if (! -w $np->opts->datadir)
+{
+	$np->nagios_die("Unable to write to data directory" . $np->opts->datadir);
+}
+
+#----------------------------------------
+# Get Cached Interface Info
+#----------------------------------------
+
+my $cached_ifinfo = get_cached_ifinfo($np, $np->opts->hostname, $np->opts->interface);
+
+#----------------------------------------
+# Switch Interface Polling
+#----------------------------------------
+
+my $ifid;
+
+if (defined($cached_ifinfo) && defined($cached_ifinfo->{ifId}))
+{
+	$ifid = $cached_ifinfo->{ifId};
+}
+else
+{
+	$ifid = get_ifid($np, $snmp_session, $np->opts->interface);
+}
+
+$np->nagios_die('interface not found') if (!defined $ifid);
+
+my $ifinfo = get_ifinfo($np, $snmp_session, $ifid);
+$ifinfo->{time} = time;
+$ifinfo->{ifRealSpeed} = compute_realspeed($ifinfo);
+$ifinfo->{ifId} = $ifid;
+
+$snmp_session->close();
+
+#----------------------------------------
+# Do the Math
+#----------------------------------------
+
+my ($inbps, $outbps, $inpps, $outpps, $inspdpct, $outspdpct);
+
+if (defined $cached_ifinfo)
+{
+	my $timedelta = $ifinfo->{time} - $cached_ifinfo->{time};
+
+	if ($timedelta > 0)
+	{
+		$inbps = ($ifinfo->{ifInOctets} - $cached_ifinfo->{ifInOctets}) * 8 / $timedelta;
+		$outbps = ($ifinfo->{ifOutOctets} - $cached_ifinfo->{ifOutOctets}) * 8 / $timedelta;
+		$inpps = ($ifinfo->{ifInUcastPkts} - $cached_ifinfo->{ifInUcastPkts}) / $timedelta;
+		$outpps = ($ifinfo->{ifOutUcastPkts} - $cached_ifinfo->{ifOutUcastPkts}) / $timedelta;
+		$inspdpct = $inbps / $ifinfo->{ifRealSpeed} * 100,
+		$outspdpct = $outbps / $ifinfo->{ifRealSpeed} * 100,
+	}
+	else
+	{
+		$inbps = $outbps = $inpps = $outpps = $inspdpct = $outspdpct = -1;
+	}
+}
+else
+{
+	$inbps = $outbps = $inpps = $outpps = $inspdpct = $outspdpct = -1;
+}
+
+#----------------------------------------
+# Save Cached Interface Info
+#----------------------------------------
+
+save_cached_ifinfo($np, $np->opts->hostname, $np->opts->interface, $ifinfo);
+
+#----------------------------------------
+# Performance Data
+#----------------------------------------
+
+if (!$np->opts->noperfdata && (lc $IFSTATE->{ifOperStatus}->{$ifinfo->{ifOperStatus}} eq 'up'))
+{
+	#$np->add_perfdata(label => "bps in", value => int($inbps), min => 0, max => $ifinfo->{ifRealSpeed}) if ($inbps >= 0);
+	$np->add_perfdata(label => "bps in", value => int($inbps)) if ($inbps >= 0);
+	$np->add_perfdata(label => "bps out", value => int($outbps)) if ($outbps >= 0);
+	$np->add_perfdata(label => "pps in", value => int($inpps)) if ($inpps >= 0);
+	$np->add_perfdata(label => "pps out", value => int($outpps)) if ($outpps >= 0);
+}
+
+#----------------------------------------
+# Metrics Summary
+#----------------------------------------
+
+my $ifspeed = unit_value($ifinfo->{ifRealSpeed}, 'bps');
+$ifspeed =~ s/\.00//;
+
+my $metrics;
+if ($inpps > 0)
+{
+	$metrics = sprintf("adm %s / lnk %s / %s - in=%s/%s (%.2f%%) out=%s/%s (%.2f%%)",
+		lc $IFSTATE->{ifAdminStatus}->{$ifinfo->{ifAdminStatus}},
+		lc $IFSTATE->{ifOperStatus}->{$ifinfo->{ifOperStatus}},
+		lc $ifspeed,
+		unit_value($inbps, 'bps', 1024),
+		unit_value($inpps, 'pps'),
+		$inspdpct,
+		unit_value($outbps, 'bps', 1024),
+		unit_value($outpps, 'pps'),
+		$outspdpct,
+	);
+}
+else
+{
+	$metrics = sprintf("adm %s / lnk %s / %s",
+		lc $IFSTATE->{ifAdminStatus}->{$ifinfo->{ifAdminStatus}},
+		lc $IFSTATE->{ifOperStatus}->{$ifinfo->{ifOperStatus}},
+		lc $ifspeed,
+	);
+}
+
+#----------------------------------------
+# Status Checks
+#----------------------------------------
+
+my $code;
+
+$np->add_message(OK, '');
+
+if ($inpps > 0)
+{
+	if (($code = $np->check_threshold(check => $inspdpct, warning => $np->opts->wpctbps, critical => $np->opts->cpctbps)) != OK)
+	{
+		$np->add_message($code, '[%BPS IN]');
+	}
+
+	if (($code = $np->check_threshold(check => $outspdpct, warning => $np->opts->wpctbps, critical => $np->opts->cpctbps)) != OK)
+	{
+		$np->add_message($code, '[%BPS OUT]');
+	}
+
+	if (($code = $np->check_threshold(check => $inbps, warning => $np->opts->wbps, critical => $np->opts->cbps)) != OK)
+	{
+		$np->add_message($code, '[BPS IN]');
+	}
+
+	if (($code = $np->check_threshold(check => $outbps, warning => $np->opts->wbps, critical => $np->opts->cbps)) != OK)
+	{
+		$np->add_message($code, '[BPS OUT]');
+	}
+
+	if (($code = $np->check_threshold(check => $inpps, warning => $np->opts->wpkts, critical => $np->opts->cpkts)) != OK)
+	{
+		$np->add_message($code, '[PPS IN]');
+	}
+
+	if (($code = $np->check_threshold(check => $outpps, warning => $np->opts->wpkts, critical => $np->opts->cpkts)) != OK)
+	{
+		$np->add_message($code, '[PPS OUT]');
+	}
+}
+
+if (($np->opts->interfacestatus == 1 && $ifinfo->{ifAdminStatus} == 1 && $ifinfo->{ifOperStatus} != 1)
+	|| ($np->opts->interfacestatus == 2 && $ifinfo->{ifAdminStatus} != 1))
+{
+	if ($np->opts->warnifcritical)
+	{
+		$np->add_message(WARNING, '[IF DOWN]');
+	}
+	else
+	{
+		$np->add_message(CRITICAL, '[IF DOWN]');
+	}
+}
+
+my ($exit_code, $exit_message) = $np->check_messages();
+
+$exit_message = join(' ', ($exit_message, $metrics));
+$exit_message =~ s/^ *//;
+
+$np->nagios_exit($exit_code, $exit_message);

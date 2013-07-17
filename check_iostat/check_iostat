@@ -1,0 +1,251 @@
+#!/usr/bin/perl
+#
+#    check_iostat nagios plugin
+#    Copyright (C) 2012 Nicolas Limage
+#
+#    This program is free software: you can redistribute it and/or modify
+#    it under the terms of the GNU General Public License as published by
+#    the Free Software Foundation, either version 3 of the License, or
+#    (at your option) any later version.
+#
+#    This program is distributed in the hope that it will be useful,
+#    but WITHOUT ANY WARRANTY; without even the implied warranty of
+#    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#    GNU General Public License for more details.
+#
+#    You should have received a copy of the GNU General Public License
+#    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+#
+use strict;
+use warnings;
+#use lib '/usr/lib/nagios/plugins/lib';
+use Nagios::Plugin;
+
+my $np = Nagios::Plugin->new(
+	shortname => 'IOSTAT',
+	usage => "usage: check_iostat [options] [-d <regexp>]",
+	plugin => 'IOSTAT',
+	version => '1.0'
+);
+
+#----------------------------------------
+# Option Parsing
+#----------------------------------------
+
+$np->add_arg(
+	spec => 'expr|e=s',
+	help => "-e, --expr=<regexp>\n  (optional) regexp defining disks to match (default: ^sd[a-z]+\$)",
+	default => '^sd[a-z]+$',
+);
+
+$np->add_arg(
+	spec => 'duration|d=i',
+	help => "-d, --duration=<integer>\n  (optional) duration of iostat data harvesting (in seconds) (default: 1)",	
+	default => 1,
+);
+
+$np->add_arg(
+	spec => 'warnutil|u=s',
+	help => "-u, --warnutil=INTEGER:INTEGER\n   warning threshold for device utilization (%)\n"
+              . " See http://nagiosplug.sourceforge.net/developer-guidelines.html#THRESHOLDFORMAT "
+              . "for the threshold format. ",
+	default => ':90',
+);
+
+$np->add_arg(
+	spec => 'critutil|U=s',
+	help => "-U, --critutil=INTEGER:INTEGER\n   critical threshold for device utilization (%)\n"
+              . " See http://nagiosplug.sourceforge.net/developer-guidelines.html#THRESHOLDFORMAT "
+              . "for the threshold format. ",
+	default => ':95',
+);
+
+$np->add_arg(
+	spec => 'warnsvctime|s=s',
+	help => "-s, --warnsvctime=INTEGER:INTEGER\n   warning threshold for service time (ms)\n"
+              . " See http://nagiosplug.sourceforge.net/developer-guidelines.html#THRESHOLDFORMAT "
+              . "for the threshold format. ",
+);
+
+$np->add_arg(
+	spec => 'critsvctime|S=s',
+	help => "-S, --critsvctime=INTEGER:INTEGER\n   critical threshold for service time (ms)\n"
+              . " See http://nagiosplug.sourceforge.net/developer-guidelines.html#THRESHOLDFORMAT "
+              . "for the threshold format. ",
+);
+
+$np->add_arg(
+	spec => 'warnavgwait|a=s',
+	help => "-a, --warnavgwait=INTEGER:INTEGER\n   warning threshold for average wait time (ms)\n"
+              . " See http://nagiosplug.sourceforge.net/developer-guidelines.html#THRESHOLDFORMAT "
+              . "for the threshold format. ",
+);
+
+$np->add_arg(
+	spec => 'critavgwait|A=s',
+	help => "-A, --critavgwait=INTEGER:INTEGER\n   critical threshold for average wait time (ms)\n"
+              . " See http://nagiosplug.sourceforge.net/developer-guidelines.html#THRESHOLDFORMAT "
+              . "for the threshold format. ",
+);
+
+$np->add_arg(
+	spec => 'warnreadwait|r=s',
+	help => "-r, --warnreadwait=INTEGER:INTEGER\n   critical threshold for read wait time (ms)\n"
+              . " See http://nagiosplug.sourceforge.net/developer-guidelines.html#THRESHOLDFORMAT "
+              . "for the threshold format. ",
+);
+
+$np->add_arg(
+	spec => 'critreadwait|R=s',
+	help => "-R, --critreadwait=INTEGER:INTEGER\n   critical threshold for read wait time (ms)\n"
+              . " See http://nagiosplug.sourceforge.net/developer-guidelines.html#THRESHOLDFORMAT "
+              . "for the threshold format. ",
+);
+
+$np->add_arg(
+	spec => 'warnwritewait|w=s',
+	help => "-w, --warnwritewait=INTEGER:INTEGER\n   warning threshold for write wait time (ms)\n"
+              . " See http://nagiosplug.sourceforge.net/developer-guidelines.html#THRESHOLDFORMAT "
+              . "for the threshold format. ",
+);
+
+$np->add_arg(
+	spec => 'critwritewait|W=s',
+	help => "-W, --critwritewait=INTEGER:INTEGER\n   critical threshold for write wait time (ms)\n"
+              . " See http://nagiosplug.sourceforge.net/developer-guidelines.html#THRESHOLDFORMAT "
+              . "for the threshold format. ",
+);
+
+$np->getopts();
+
+# Safety Net
+alarm $np->opts->timeout;
+
+my $code;
+my $matched = 0;
+my $iteration = 0;
+my $nbdisks = 0;
+my $maxutil = 0;
+my $totalutil = 0;
+my $maxsvctime = 0;
+my $totalsvctime = 0;
+my $maxawait = 0;
+my $totalawait = 0;
+my $maxrawait = 0;
+my $totalrawait = 0;
+my $maxwawait = 0;
+my $totalwawait = 0;
+
+my $duration = $np->opts->duration;
+$np->nagios_die("duration must not be < 1") if ($duration < 1);
+
+foreach (`LANG=C iostat -dx $duration 2`)
+{
+	if (/^([a-z0-9-]+)\s+(\d+\.\d+)\s+(\d+\.\d+)\s+(\d+\.\d+)\s+(\d+\.\d+)\s+(\d+\.\d+)\s+(\d+\.\d+)\s+(\d+\.\d+)\s+(\d+\.\d+)\s+(\d+\.\d+)\s+(\d+\.\d+)\s+(\d+\.\d+)\s+(\d+\.\d+)\s+(\d+\.\d+)$/)
+	{
+		next if $iteration < 2;
+		my ($device, $rrqms, $wrqms, $rs, $ws, $rkBs, $wkBs, $avgrqsz, $avgqusz, $await, $rawait, $wawait, $svctm, $util) = ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14);
+
+		my $regexp = $np->opts->expr;
+		$matched = 0;
+		eval { if ($device =~ /$regexp/) { $matched = 1; } };
+		$np->nagios_die("Error in regexp: $@") if ($@);
+
+		if ($matched)
+		{
+			$nbdisks++;
+
+			#-------------------------
+			# %util
+			#-------------------------
+			$code = $np->check_threshold(
+				check => $util,
+				warning => $np->opts->warnutil,
+				critical => $np->opts->critutil,
+			);
+			$np->add_message($code, "$device is $util% busy") if ($code != OK);
+			$maxutil = $util if $util > $maxutil;
+			$totalutil += $util;
+
+			#-------------------------
+			# svctime
+			#-------------------------
+			$code = $np->check_threshold(
+				check => $svctm,
+				warning => $np->opts->warnsvctime,
+				critical => $np->opts->critsvctime,
+			);
+			$np->add_message($code, "$device svctime is $svctm") if ($code != OK);
+			$maxsvctime = $svctm if $svctm > $maxsvctime;
+			$totalsvctime += $svctm;
+
+			#-------------------------
+			# await
+			#-------------------------
+			$code = $np->check_threshold(
+				check => $await,
+				warning => $np->opts->warnavgwait,
+				critical => $np->opts->critavgwait,
+			);
+			$np->add_message($code, "max wait is $await") if ($code != OK);
+			$maxawait = $await if $await > $maxawait;
+			$totalawait += $await;
+
+			#-------------------------
+			# readwait
+			#-------------------------
+			$code = $np->check_threshold(
+				check => $rawait,
+				warning => $np->opts->warnreadwait,
+				critical => $np->opts->critreadwait,
+			);
+			$np->add_message($code, "$device read wait is $rawait") if ($code != OK);
+			$maxrawait = $rawait if $rawait > $maxrawait;
+			$totalrawait += $rawait;
+
+			#-------------------------
+			# writewait
+			#-------------------------
+			$code = $np->check_threshold(
+				check => $wawait,
+				warning => $np->opts->warnwritewait,
+				critical => $np->opts->critwritewait,
+			);
+			$np->add_message($code, "$device write wait is $wawait") if ($code != OK);
+			$maxwawait = $wawait if $wawait > $maxwawait;
+			$totalwawait += $wawait;
+		}
+	}
+	elsif (/^Device:/)
+	{
+		$iteration++;
+	}
+}
+
+$np->nagios_die("error executing 'iostat'") if (${^CHILD_ERROR_NATIVE} != 0);
+
+#----------------------------------------
+# Performance Data
+#----------------------------------------
+if ($nbdisks > 0)
+{
+	$np->add_perfdata(label => "%util max", min => 0, uom => '%', value => $maxutil / 1000);
+	$np->add_perfdata(label => "%util avg", min => 0, uom => '%', value => sprintf("%.2f", $totalutil / $nbdisks / 1000));
+	$np->add_perfdata(label => "svctime max", min => 0, uom => '%', value => $maxsvctime / 1000);
+	$np->add_perfdata(label => "svctime avg", min => 0, uom => '%', value => sprintf("%.2f", $totalsvctime / $nbdisks / 1000));
+	$np->add_perfdata(label => "io wait max", min => 0, uom => 's', value => $maxawait / 1000);
+	$np->add_perfdata(label => "io wait avg", min => 0, uom => 's', value => sprintf("%.2f", $totalawait / $nbdisks / 1000));
+	$np->add_perfdata(label => "read wait max", min => 0, uom => 's', value => $maxrawait / 1000);
+	$np->add_perfdata(label => "read wait avg", min => 0, uom => 's', value => sprintf("%.2f", $totalrawait / $nbdisks / 1000));
+	$np->add_perfdata(label => "write wait max", min => 0, uom => 's', value => $maxwawait / 1000);
+	$np->add_perfdata(label => "write wait avg", min => 0, uom => 's', value => sprintf("%.2f", $totalwawait / $nbdisks / 1000));
+}
+
+$np->add_message(OK, sprintf("%s disk%s OK", $nbdisks, ($nbdisks > 1 ? 's' : '')));
+
+#----------------------------------------
+# Status Checks
+#----------------------------------------
+
+my ($exit_code, $exit_message) = $np->check_messages(join => ', ');
+$np->nagios_exit($exit_code, $exit_message);

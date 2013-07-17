@@ -1,0 +1,1155 @@
+#!/usr/bin/perl
+#
+#    check_isilon nagios plugin
+#    Copyright (C) 2012 Nicolas Limage
+#
+#    This program is free software: you can redistribute it and/or modify
+#    it under the terms of the GNU General Public License as published by
+#    the Free Software Foundation, either version 3 of the License, or
+#    (at your option) any later version.
+#
+#    This program is distributed in the hope that it will be useful,
+#    but WITHOUT ANY WARRANTY; without even the implied warranty of
+#    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#    GNU General Public License for more details.
+#
+#    You should have received a copy of the GNU General Public License
+#    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+#
+use strict;
+use warnings;
+use 5.008;
+use lib '/usr/lib/nagios/plugins/lib';
+use Nagios::Plugin;
+use Net::SNMP;
+use Carp;
+use Data::Dumper;
+
+#my $CENTPLUGINSDIR = '/var/lib/centreon/centplugins';
+
+my $OIDS = {
+	ClusterName => '.1.3.6.1.4.1.12124.1.1.1.0',
+	ClusterHealth => '.1.3.6.1.4.1.12124.1.1.2.0',
+	ClusterGuid => '.1.3.6.1.4.1.12124.1.1.3.0',
+	ClusterNodeCount => '.1.3.6.1.4.1.12124.1.1.4.0',
+	ClusterOnlineNodes => '.1.3.6.1.4.1.12124.1.1.6.0',
+	ClusterOfflineNodes => '.1.3.6.1.4.1.12124.1.1.7.0',
+
+	ClusterIFSInBPS => '.1.3.6.1.4.1.12124.1.2.1.2.0',
+	ClusterIFSOutBPS => '.1.3.6.1.4.1.12124.1.2.1.4.0',
+
+	ClusterNetInBPS => '.1.3.6.1.4.1.12124.1.2.2.2.0',
+	ClusterNetOutBPS => '.1.3.6.1.4.1.12124.1.2.2.4.0',
+	
+	ClusterCPUUser => '.1.3.6.1.4.1.12124.1.2.3.1.0',
+	ClusterCPUNice => '.1.3.6.1.4.1.12124.1.2.3.2.0',
+	ClusterCPUSystem => '.1.3.6.1.4.1.12124.1.2.3.3.0',
+	ClusterCPUInterrupt => '.1.3.6.1.4.1.12124.1.2.3.4.0',
+	ClusterCPUIdle => '.1.3.6.1.4.1.12124.1.2.3.5.0',
+
+	ClusterIFSTotalBytes => '.1.3.6.1.4.1.12124.1.3.1.0',
+	ClusterIFSUsedBytes => '.1.3.6.1.4.1.12124.1.3.2.0',
+	ClusterIFSAvailBytes => '.1.3.6.1.4.1.12124.1.3.3.0',
+	ClusterIFSFreeBytes => '.1.3.6.1.4.1.12124.1.3.4.0',
+
+	ClusterLicenseTable => '.1.3.6.1.4.1.12124.1.5.1.1',
+
+	NodeName => '.1.3.6.1.4.1.12124.2.1.1.0',
+	NodeHealth => '.1.3.6.1.4.1.12124.2.1.2.0',
+	NodeType => '.1.3.6.1.4.1.12124.2.1.3.0',
+	NodeReadOnly => '.1.3.6.1.4.1.12124.2.1.4.0',
+
+	NodeIFSInBPS => '.1.3.6.1.4.1.12124.2.2.1.2.0',
+	NodeIFSOutBPS => '.1.3.6.1.4.1.12124.2.2.1.4.0',
+
+	NodeNetInBPS => '.1.3.6.1.4.1.12124.2.2.2.2.0',
+	NodeNetOutBPS => '.1.3.6.1.4.1.12124.2.2.2.4.0',
+
+	NodeCPUUser => '.1.3.6.1.4.1.12124.2.2.3.1.0',
+	NodeCPUNice => '.1.3.6.1.4.1.12124.2.2.3.2.0',
+	NodeCPUSystem => '.1.3.6.1.4.1.12124.2.2.3.3.0',
+	NodeCPUInterrupt => '.1.3.6.1.4.1.12124.2.2.3.4.0',
+	NodeCPUIdle => '.1.3.6.1.4.1.12124.2.2.3.5.0',
+
+	NodeProtocolPerfTable => '.1.3.6.1.4.1.12124.2.2.10.1',
+
+	NodeDiskPerfTable => '.1.3.6.1.4.1.12124.2.2.52.1',
+	NodeDiskHealthTable => '.1.3.6.1.4.1.12124.2.52.1',
+	NodeFanTable => '.1.3.6.1.4.1.12124.2.53.1',
+	NodeTempTable => '.1.3.6.1.4.1.12124.2.54.1',
+	NodePowerTable => '.1.3.6.1.4.1.12124.2.55.1',
+};
+
+my $COLUMNS = {
+	NodeFanTable => {
+		#1 => 'FanNumber',
+		#2 => 'FanName',
+		3 => 'FanDescription',
+		4 => 'FanSpeed',
+	},
+	NodeTempTable => {
+		#1 => 'TempSensorNumber',
+		#2 => 'TempSensorName',
+		3 => 'TempSensorDescription',
+		4 => 'TempSensorValue',
+	},
+	NodePowerTable => {
+		#1 => 'PowerSensorNumber',
+		#2 => 'PowerSensorName',
+		3 => 'PowerSensorDescription',
+		4 => 'PowerSensorValue',
+	},
+	NodeDiskPerfTableOps => {
+		#1 => 'diskPerfBay',
+		#2 => 'diskPerfDeviceName',
+		3 => 'diskPerfOpsPerSecond',
+		#4 => 'diskPerfInBitsPerSecond',
+		#5 => 'diskPerfOutBitsPerSecond',
+	},
+	NodeDiskPerfTableBandwidth => {
+		#1 => 'diskPerfBay',
+		#2 => 'diskPerfDeviceName',
+		#3 => 'diskPerfOpsPerSecond',
+		4 => 'diskPerfInBitsPerSecond',
+		5 => 'diskPerfOutBitsPerSecond',
+	},
+	NodeDiskHealthTable => {
+		1 => 'diskBay',
+		#2 => 'diskLogicalNumber',
+		#3 => 'diskChassisNumber',
+		#4 => 'diskDeviceName',
+		5 => 'diskStatus',
+		#6 => 'diskModel',
+		#7 => 'diskSerialNumber',
+		#8 => 'diskFirmwareVersion',
+		#9 => 'diskSizeBytes',
+	},
+	NodeProtocolPerfTableOps => {
+		1 => 'protocolName',
+		#2 => 'protocolOpCount',
+		3 => 'protocolOpsPerSecond',
+		#4 => 'inMinBytes',
+		#5 => 'inMaxBytes',
+		#6 => 'inAvgBytes',
+		#7 => 'inStdDevBytes',
+		#8 => 'inBitsPerSecond',
+		#9 => 'outMinBytes',
+		#10 => 'outMaxBytes',
+		#11 => 'outAvgBytes',
+		#12 => 'outStdDevBytes',
+		#13 => 'outBitsPerSecond',
+		#14 => 'latencyMin',
+		#15 => 'latencyMax',
+		#16 => 'latencyAverage',
+		#17 => 'latencyStdDev',
+	},
+	NodeProtocolPerfTableBandwidth => {
+		1 => 'protocolName',
+		#2 => 'protocolOpCount',
+		#3 => 'protocolOpsPerSecond',
+		#4 => 'inMinBytes',
+		#5 => 'inMaxBytes',
+		#6 => 'inAvgBytes',
+		#7 => 'inStdDevBytes',
+		8 => 'inBitsPerSecond',
+		#9 => 'outMinBytes',
+		#10 => 'outMaxBytes',
+		#11 => 'outAvgBytes',
+		#12 => 'outStdDevBytes',
+		13 => 'outBitsPerSecond',
+		#14 => 'latencyMin',
+		#15 => 'latencyMax',
+		#16 => 'latencyAverage',
+		#17 => 'latencyStdDev',
+	},
+	NodeProtocolPerfTableLatency => {
+		1 => 'protocolName',
+		#2 => 'protocolOpCount',
+		#3 => 'protocolOpsPerSecond',
+		#4 => 'inMinBytes',
+		#5 => 'inMaxBytes',
+		#6 => 'inAvgBytes',
+		#7 => 'inStdDevBytes',
+		#8 => 'inBitsPerSecond',
+		#9 => 'outMinBytes',
+		#10 => 'outMaxBytes',
+		#11 => 'outAvgBytes',
+		#12 => 'outStdDevBytes',
+		#13 => 'outBitsPerSecond',
+		14 => 'latencyMin',
+		15 => 'latencyMax',
+		16 => 'latencyAverage',
+		#17 => 'latencyStdDev',
+	},
+};
+
+my $STATUS = {
+	ClusterHealth => {
+		0 => OK, # ok
+		1 => WARNING, # attn
+		2 => CRITICAL, # down
+		3 => WARNING, # invalid
+	},
+	NodeHealth => {
+		0 => OK, # ok
+		1 => WARNING, # attn
+		2 => CRITICAL, # down
+		3 => WARNING, # invalid
+	},
+	NodeType => {
+		0 => 'storage',
+		1 => 'accelerator',
+	},
+	NodeReadOnly => {
+		0 => 'no',
+		1 => 'yes',
+	},
+	'Nagios' => {
+		0 => 'OK',
+		1 => 'WARNING',
+		2 => 'CRITICAL',
+		3 => 'UNKNOWN',
+	},
+};
+
+#----------------------------------------
+# Utils
+#----------------------------------------
+
+sub unit_value
+{
+	my $value = shift;
+	my $unit = (shift or '');
+	my $multiplier = (shift or 1000);
+	my $digits = (shift or 2);
+	my @symbols = ('f', 'p', 'n', 'µ', 'm', '', 'k', 'M', 'G', 'T', 'P');
+	my $sidx = 5;
+
+	return undef if !defined($value);
+
+	if ($value)
+	{
+		while ($value >= $multiplier && $sidx < @symbols)
+		{
+			$value /= $multiplier;
+			$sidx++;
+		}
+
+		while ($value <= 1 && $sidx > 0)
+		{
+			$value *= $multiplier;
+			$sidx--;
+		}
+	}
+
+	return sprintf("%.${digits}f%s%s", $value, $symbols[$sidx], $unit);
+}
+
+sub set_modename($$)
+{
+	my $np = shift or confess;
+	my $name = shift or confess;
+
+	$np->{shortname} .= (' ' . uc($name));
+}
+
+#----------------------------------------
+# SNMP Functions
+#----------------------------------------
+
+sub get_request($$$)
+{
+	my $np = shift or confess;
+	my $snmp_session = shift or confess;
+	my $columns = shift or confess;
+
+	my $result = $snmp_session->get_request(-varbindlist => $columns);
+	$np->nagios_die('get_request: ' . $snmp_session->error()) if (!defined $result);
+	return $result;
+}
+
+sub table_request($$$$)
+{
+	my $np = shift or confess;
+	my $snmp_session = shift or confess;
+	my $baseoid = shift or confess;
+	my $columns = shift or confess;
+
+	my $info = {};
+
+	if ($np->opts->verbose > 2)
+	{
+		print "DEBUG table_request baseoid=";
+		print Dumper($baseoid);
+		print "DEBUG table_request columns=";
+		print Dumper($columns);
+	}
+
+	#print Dumper([map { $_ = "$baseoid.$_" } sort keys %$columns]) if ($np->opts->verbose > 2);
+	#my $result = $snmp_session->get_entries(-columns => [ map { $_ = "$baseoid.$_" } sort keys %$columns ]);
+	my $result = $snmp_session->get_table(-baseoid => $baseoid);
+	$np->nagios_die($snmp_session->error()) if (!defined $result);
+	print Dumper($result) if ($np->opts->verbose > 2);
+
+	foreach my $key (keys %$result)
+	{
+		my $id = $key;
+		$id =~ s/$baseoid\.//;
+		if ($id =~ /(\d+)\.(\S+)/)
+		{
+			if (defined($columns->{$1}))
+			{
+				printf "DEBUG col=%s(%s) entry=%s val=%s\n", $1, $columns->{$1}, $2, $result->{$key} if $np->opts->verbose > 2;
+				$info->{$2}->{$columns->{$1}} = $result->{$key};
+			}
+		}
+		else
+		{
+			$np->nagios_die("table_request: malformed id: '$id'" );
+		}
+	}
+
+	return $info;
+}
+
+sub check_absotable($$$$$$$)
+{
+	my $np = shift or confess;
+	my $snmp_session = shift or confess;
+	my $table_id = shift or confess;
+	my $name = shift or confess;
+	my $value = shift or confess;
+	my $unit = shift or confess;
+
+	my $info = &table_request($np, $snmp_session, $OIDS->{$table_id}, $COLUMNS->{$table_id});
+
+	foreach my $key (sort { $a <=> $b } keys %$info)
+	{
+		my $code = $np->check_threshold(
+			check => $info->{$key}->{$value},
+			warning => $np->opts->warning,
+			critical => $np->opts->critical);
+
+		$np->add_message($code, sprintf("%s: %s%s",
+			$info->{$key}->{$name},
+			$info->{$key}->{$value},
+			$unit)) if ($code != OK);
+
+		$np->add_perfdata(label => $info->{$key}->{$name},
+			value => $info->{$key}->{$value},
+			min => 0);
+	}
+}
+
+sub get_normval($)
+{
+	$_ = shift;
+	return sprintf("%s%s", $1 ? '-' : '', $2) if (/(-)?((\d+)(\.\d+)?)[vV]/);
+	return '';
+}
+
+# check_powertable
+# verifie les valeurs en utilisant +-warning% +-critical%
+sub check_powertable($$$$$$$)
+{
+	my $np = shift or confess;
+	my $snmp_session = shift or confess;
+	my $table_id = shift or confess;
+	my $name = shift or confess;
+	my $value = shift or confess;
+	my $unit = shift or confess;
+
+	my $info = &table_request($np, $snmp_session, $OIDS->{$table_id}, $COLUMNS->{$table_id});
+
+	foreach my $key (sort { $a <=> $b } keys %$info)
+	{
+		my $normval = &get_normval($info->{$key}->{$name});
+		#printf("%s:%s (%s)\n", $info->{$key}->{$name}, $normval, $info->{$key}->{$value});
+		my ($highwarn, $lowwarn, $highcrit, $lowcrit, $a, $b);
+
+		if ($normval)
+		{
+			if ($np->opts->warning && $np->opts->warning > 0 && $np->opts->warning <= 100)
+			{
+				$a = $normval * (1 + int($np->opts->warning) / 100);
+				$b = $normval * (1 - int($np->opts->warning) / 100);
+				($lowwarn, $highwarn) = (($a > $b) ? ($b, $a) : ($a, $b));
+			}
+
+			if ($np->opts->critical && $np->opts->critical > 0 && $np->opts->critical <= 100)
+			{
+				$a = $normval * (1 + int($np->opts->critical) / 100);
+				$b = $normval * (1 - int($np->opts->critical) / 100);
+				($lowcrit, $highcrit) = (($a > $b) ? ($b, $a) : ($a, $b));
+			}
+		}
+
+		my $code = $np->check_threshold(
+			check => $info->{$key}->{$value},
+			warning => defined($highwarn) ? "$lowwarn:$highwarn" : undef,
+			critical => defined($highcrit) ? "$lowcrit:$highcrit" : undef,
+		);
+
+		$np->add_message($code, sprintf("%s: %s%s",
+			$info->{$key}->{$name},
+			$info->{$key}->{$value},
+			$unit)) if ($code != OK);
+
+		$np->add_perfdata(label => $info->{$key}->{$name},
+			value => $info->{$key}->{$value},
+			min => 0);
+	}
+}
+
+#----------------------------------------
+# Mode Functions and Bindings
+#----------------------------------------
+
+sub mode_cluster_health($$)
+{
+	my $np = shift or confess;
+	my $snmp_session = shift or confess;
+
+	&set_modename($np, 'node health');
+	my $info = &get_request($np, $snmp_session, [ 
+		$OIDS->{ClusterName},	
+		$OIDS->{ClusterHealth},	
+		$OIDS->{ClusterGuid},	
+		$OIDS->{ClusterNodeCount},
+		$OIDS->{ClusterOnlineNodes},
+		$OIDS->{ClusterOfflineNodes},
+	]);
+
+	my $status = $STATUS->{ClusterHealth}->{$info->{$OIDS->{ClusterHealth}}};
+	$np->add_message($status, sprintf("Cluster '%s' %s", $info->{$OIDS->{ClusterName}}, $STATUS->{Nagios}->{$status}));
+	$np->add_message(CRITICAL, sprintf("Cluster nodes down: ", $info->{$OIDS->{ClusterOfflineNodes}})) if ($info->{$OIDS->{ClusterOfflineNodes}});
+	$np->add_message(OK, sprintf("%s nodes, uid=%s", $info->{$OIDS->{ClusterNodeCount}}, $info->{$OIDS->{ClusterGuid}}));
+}
+
+sub mode_node_health($$)
+{
+	my $np = shift or confess;
+	my $snmp_session = shift or confess;
+
+	&set_modename($np, 'node health');
+	my $info = &get_request($np, $snmp_session, [ 
+		$OIDS->{NodeName},	
+		$OIDS->{NodeHealth},	
+		$OIDS->{NodeType},	
+		$OIDS->{NodeReadOnly},
+	]);
+
+	my $status = $STATUS->{NodeHealth}->{$info->{$OIDS->{NodeHealth}}};
+	$np->add_message($status, sprintf("Node '%s' %s", $info->{$OIDS->{NodeName}}, $STATUS->{Nagios}->{$status}));
+	$np->add_message(OK, sprintf("type=%s, readonly=%s", $STATUS->{NodeType}->{$info->{$OIDS->{NodeType}}}, $STATUS->{NodeReadOnly}->{$info->{$OIDS->{NodeReadOnly}}}));
+}
+
+sub mode_cluster_network_bandwidth($$)
+{
+	my $np = shift or die;
+	my $snmp_session = shift or die;
+
+	&set_modename($np, 'cluster network bandwidth');
+	my $info = &get_request($np, $snmp_session, [
+		$OIDS->{ClusterNetInBPS},
+		$OIDS->{ClusterNetOutBPS},
+	]);
+
+	my $code;
+
+	$code = $np->check_threshold(check => $info->{$OIDS->{ClusterNetInBPS}}, warning => $np->opts->warning, critical => $np->opts->critical);
+	$np->add_message($code, 'Input rate out of limits') if ($code != OK);
+	$code = $np->check_threshold(check => $info->{$OIDS->{ClusterNetOutBPS}}, warning => $np->opts->warning, critical => $np->opts->critical);
+	$np->add_message($code, 'Output rate out of limits') if ($code != OK);
+
+	$np->add_message(OK, sprintf("Cluster Network in=%sbps out=%sbps",
+		&unit_value($info->{$OIDS->{ClusterNetInBPS}}),
+		&unit_value($info->{$OIDS->{ClusterNetOutBPS}})
+	));
+	$np->add_perfdata(label => 'bps in', value => $info->{$OIDS->{ClusterNetInBPS}}, uom => 'b', min => 0);
+	$np->add_perfdata(label => 'bps out', value => $info->{$OIDS->{ClusterNetOutBPS}}, uom => 'b', min => 0);
+}
+
+sub mode_cluster_cpu_usage($$)
+{
+	my $np = shift or die;
+	my $snmp_session = shift or die;
+
+	&set_modename($np, 'cluster cpu usage');
+	my $info = &get_request($np, $snmp_session, [
+		$OIDS->{ClusterCPUUser},
+		$OIDS->{ClusterCPUNice},
+		$OIDS->{ClusterCPUSystem},
+		$OIDS->{ClusterCPUInterrupt},
+		$OIDS->{ClusterCPUIdle},
+	]);
+
+	my $code = $np->check_threshold(check => (100 - ($info->{$OIDS->{ClusterCPUIdle}} / 10)), warning => $np->opts->warning, critical => $np->opts->critical);
+	$np->add_message($code, 'CPU Idle out of limits') if ($code != OK);
+
+	$np->add_message(OK, sprintf("Cluster CPU user=%s%% nice=%s%% sys=%s%% int=%s%% idle=%s%%",
+		$info->{$OIDS->{ClusterCPUUser}} / 10,
+		$info->{$OIDS->{ClusterCPUNice}} / 10,
+		$info->{$OIDS->{ClusterCPUSystem}} / 10,
+		$info->{$OIDS->{ClusterCPUInterrupt}} / 10,
+		$info->{$OIDS->{ClusterCPUIdle}} / 10,
+	));
+
+	$np->add_perfdata(label => 'user', value => ($info->{$OIDS->{ClusterCPUUser}} / 10), uom => '%', min => 0);
+	$np->add_perfdata(label => 'nice', value => ($info->{$OIDS->{ClusterCPUNice}} / 10), uom => '%', min => 0);
+	$np->add_perfdata(label => 'system', value => ($info->{$OIDS->{ClusterCPUSystem}} / 10), uom => '%', min => 0);
+	$np->add_perfdata(label => 'interrupt', value => ($info->{$OIDS->{ClusterCPUInterrupt}} / 10), uom => '%', min => 0);
+	$np->add_perfdata(label => 'idle', value => ($info->{$OIDS->{ClusterCPUIdle}} / 10), uom => '%', min => 0);
+}
+
+sub mode_node_cpu_usage($$)
+{
+	my $np = shift or die;
+	my $snmp_session = shift or die;
+
+	&set_modename($np, 'node cpu usage');
+	my $info = &get_request($np, $snmp_session, [
+		$OIDS->{NodeCPUUser},
+		$OIDS->{NodeCPUNice},
+		$OIDS->{NodeCPUSystem},
+		$OIDS->{NodeCPUInterrupt},
+		$OIDS->{NodeCPUIdle},
+	]);
+
+	my $code = $np->check_threshold(check => (100 - ($info->{$OIDS->{NodeCPUIdle}} / 10)), warning => $np->opts->warning, critical => $np->opts->critical);
+	$np->add_message($code, 'CPU Idle out of limits') if ($code != OK);
+
+	$np->add_message(OK, sprintf("Node CPU user=%s%% nice=%s%% sys=%s%% int=%s%% idle=%s%%",
+		$info->{$OIDS->{NodeCPUUser}} / 10,
+		$info->{$OIDS->{NodeCPUNice}} / 10,
+		$info->{$OIDS->{NodeCPUSystem}} / 10,
+		$info->{$OIDS->{NodeCPUInterrupt}} / 10,
+		$info->{$OIDS->{NodeCPUIdle}} / 10,
+	));
+
+	$np->add_perfdata(label => 'user', value => ($info->{$OIDS->{NodeCPUUser}} / 10), uom => '%', min => 0);
+	$np->add_perfdata(label => 'nice', value => ($info->{$OIDS->{NodeCPUNice}} / 10), uom => '%', min => 0);
+	$np->add_perfdata(label => 'system', value => ($info->{$OIDS->{NodeCPUSystem}} / 10), uom => '%', min => 0);
+	$np->add_perfdata(label => 'interrupt', value => ($info->{$OIDS->{NodeCPUInterrupt}} / 10), uom => '%', min => 0);
+	$np->add_perfdata(label => 'idle', value => ($info->{$OIDS->{NodeCPUIdle}} / 10), uom => '%', min => 0);
+}
+
+
+sub mode_cluster_ifs_bandwidth($$)
+{
+	my $np = shift or die;
+	my $snmp_session = shift or die;
+
+	&set_modename($np, 'cluster ifs bandwidth');
+	my $info = &get_request($np, $snmp_session, [
+		$OIDS->{ClusterIFSInBPS},
+		$OIDS->{ClusterIFSOutBPS},
+	]);
+
+	my $code;
+
+	$code = $np->check_threshold(check => $info->{$OIDS->{ClusterIFSInBPS}}, warning => $np->opts->warning, critical => $np->opts->critical);
+	$np->add_message($code, 'Input rate out of limits') if ($code != OK);
+	$code = $np->check_threshold(check => $info->{$OIDS->{ClusterIFSOutBPS}}, warning => $np->opts->warning, critical => $np->opts->critical);
+	$np->add_message($code, 'Output rate out of limits') if ($code != OK);
+
+	$np->add_message(OK, sprintf("Cluster IFS in=%sbps out=%sbps",
+		&unit_value($info->{$OIDS->{ClusterIFSInBPS}}),
+		&unit_value($info->{$OIDS->{ClusterIFSOutBPS}})
+	));
+	$np->add_perfdata(label => 'bps in', value => $info->{$OIDS->{ClusterIFSInBPS}}, uom => 'b', min => 0);
+	$np->add_perfdata(label => 'bps out', value => $info->{$OIDS->{ClusterIFSOutBPS}}, uom => 'b', min => 0);
+}
+
+sub mode_cluster_ifs_space($$$)
+{
+	my $np = shift or die;
+	my $snmp_session = shift or die;
+
+	&set_modename($np, 'cluster ifs space');
+	my $info = &get_request($np, $snmp_session, [
+		$OIDS->{ClusterIFSTotalBytes},
+		$OIDS->{ClusterIFSUsedBytes},
+		$OIDS->{ClusterIFSAvailBytes},
+		$OIDS->{ClusterIFSFreeBytes},
+	]);
+
+	$np->nagios_die("ClusterIFSTotalBytes == 0") if (!$info->{$OIDS->{ClusterIFSTotalBytes}});
+	my $pctfree = $info->{$OIDS->{ClusterIFSUsedBytes}} / $info->{$OIDS->{ClusterIFSTotalBytes}} * 100;
+	my $code = $np->check_threshold(check => $pctfree, warning => $np->opts->warning, critical => $np->opts->critical);
+	$np->add_message($code, 'Used space out of limits') if ($code != OK);
+
+	$np->add_message(OK, sprintf("Cluster IFS total=%sB used=%sB(%s%%) avail=%sB(%s%%) free=%sB(%s%%)",
+		&unit_value($info->{$OIDS->{ClusterIFSTotalBytes}}),
+		&unit_value($info->{$OIDS->{ClusterIFSUsedBytes}}),
+		($info->{$OIDS->{ClusterIFSUsedBytes}} / $info->{$OIDS->{ClusterIFSTotalBytes}} * 100),
+		&unit_value($info->{$OIDS->{ClusterIFSAvailBytes}}),
+		($info->{$OIDS->{ClusterIFSAvailBytes}} / $info->{$OIDS->{ClusterIFSTotalBytes}} * 100),
+		&unit_value($info->{$OIDS->{ClusterIFSFreeBytes}}),
+		($info->{$OIDS->{ClusterIFSFreeBytes}} / $info->{$OIDS->{ClusterIFSTotalBytes}} * 100),
+	));
+
+	$np->add_perfdata(label => 'total bytes', value => $info->{$OIDS->{ClusterIFSTotalBytes}}, uom => 'B', min => 0);
+	$np->add_perfdata(label => 'used bytes', value => $info->{$OIDS->{ClusterIFSUsedBytes}}, uom => 'B', min => 0);
+	$np->add_perfdata(label => 'avail bytes', value => $info->{$OIDS->{ClusterIFSAvailBytes}}, uom => 'B', min => 0);
+	$np->add_perfdata(label => 'free bytes', value => $info->{$OIDS->{ClusterIFSFreeBytes}}, uom => 'B', min => 0);
+}
+
+sub mode_node_network_bandwidth($$)
+{
+	my $np = shift or die;
+	my $snmp_session = shift or die;
+
+	&set_modename($np, 'network bandwidth');
+	my $info = &get_request($np, $snmp_session, [
+		$OIDS->{NodeNetInBPS},
+		$OIDS->{NodeNetOutBPS},
+	]);
+
+	my $code;
+
+	$code = $np->check_threshold(check => $info->{$OIDS->{NodeNetInBPS}}, warning => $np->opts->warning, critical => $np->opts->critical);
+	$np->add_message($code, 'Input rate out of limits') if ($code != OK);
+	$code = $np->check_threshold(check => $info->{$OIDS->{NodeNetOutBPS}}, warning => $np->opts->warning, critical => $np->opts->critical);
+	$np->add_message($code, 'Output rate out of limits') if ($code != OK);
+
+	$np->add_message(OK, sprintf("Node Network in=%sbps out=%sbps",
+		&unit_value($info->{$OIDS->{NodeNetInBPS}}),
+		&unit_value($info->{$OIDS->{NodeNetOutBPS}})
+	));
+	$np->add_perfdata(label => 'bps in', value => $info->{$OIDS->{NodeNetInBPS}}, uom => 'b', min => 0);
+	$np->add_perfdata(label => 'bps out', value => $info->{$OIDS->{NodeNetOutBPS}}, uom => 'b', min => 0);
+}
+
+sub mode_node_protocol_ops($$)
+{
+	my $np = shift or die;
+	my $snmp_session = shift or die;
+
+	&set_modename($np, 'protocol ops');
+	my $info = &table_request($np, $snmp_session, $OIDS->{NodeProtocolPerfTable}, $COLUMNS->{NodeProtocolPerfTableOps});
+
+	my $found = 0;
+	foreach my $key (keys %$info)
+	{
+		next if ($np->opts->protocol && $info->{$key}->{protocolName} ne $np->opts->protocol);
+
+		$found = 1;
+		my $code = $np->check_threshold(
+			check => $info->{$key}->{protocolOpsPerSecond},
+			warning => $np->opts->warning,
+			critical => $np->opts->critical,
+		);
+		$np->add_message($code, sprintf("%s ops/s out of limits", $info->{$key}->{protocolName})) if ($code != OK);
+		$np->add_message(OK, sprintf("%s ops/s=%s", $info->{$key}->{protocolName}, $info->{$key}->{protocolOpsPerSecond}));
+		$np->add_perfdata(
+			label => $np->opts->protocol ? 'ops/s' : sprintf("%s ops/s", $info->{$key}->{protocolName}),
+			value => $info->{$key}->{protocolOpsPerSecond},
+			min => 0
+		);
+	}
+
+	$np->nagios_die("protocol not found") if !$found;
+}
+
+sub mode_node_protocol_bandwidth($$)
+{
+	my $np = shift or die;
+	my $snmp_session = shift or die;
+
+	&set_modename($np, 'protocol bandwidth');
+	my $info = &table_request($np, $snmp_session, $OIDS->{NodeProtocolPerfTable}, $COLUMNS->{NodeProtocolPerfTableBandwidth});
+
+	my $found = 0;
+	foreach my $key (keys %$info)
+	{
+		next if ($np->opts->protocol && $info->{$key}->{protocolName} ne $np->opts->protocol);
+
+		$found = 1;
+		my $code;
+		$code = $np->check_threshold(check => $info->{$key}->{inBitsPerSecond}, warning => $np->opts->warning, critical => $np->opts->critical);
+		$np->add_message($code, 'Input rate out of limits') if ($code != OK);
+		$code = $np->check_threshold(check => $info->{$key}->{outBitsPerSecond}, warning => $np->opts->warning, critical => $np->opts->critical);
+		$np->add_message($code, 'Output rate out of limits') if ($code != OK);
+
+		$np->add_message(OK, sprintf('%s in=%sbps out=%sbps',
+			$info->{$key}->{protocolName},
+			&unit_value($info->{$key}->{inBitsPerSecond}),
+			&unit_value($info->{$key}->{outBitsPerSecond}),
+		));
+		$np->add_perfdata(label => ($np->opts->protocol ? 'bps in' : sprintf('%s bps in', $info->{$key}->{protocolName})), value => $info->{$key}->{inBitsPerSecond}, uom => 'b', min => 0);
+		$np->add_perfdata(label => ($np->opts->protocol ? 'bps out' : sprintf('%s bps out', $info->{$key}->{protocolName})), value => $info->{$key}->{outBitsPerSecond}, uom => 'b', min => 0);
+	}
+
+	$np->nagios_die("protocol not found") if !$found;
+}
+
+sub mode_node_protocol_latency($$)
+{
+	my $np = shift or die;
+	my $snmp_session = shift or die;
+
+	&set_modename($np, 'protocol latency');
+	my $info = &table_request($np, $snmp_session, $OIDS->{NodeProtocolPerfTable}, $COLUMNS->{NodeProtocolPerfTableLatency});
+
+	my $found = 0;
+	foreach my $key (keys %$info)
+	{
+		next if ($np->opts->protocol && $info->{$key}->{protocolName} ne $np->opts->protocol);
+
+		$found = 1;
+		my $code = $np->check_threshold(
+			check => $info->{$key}->{latencyMax},
+			warning => $np->opts->warning,
+			critical => $np->opts->critical,
+		);
+		$np->add_message($code, sprintf("%s max latency out of limits", $info->{$key}->{protocolName})) if ($code != OK);
+		$np->add_message(OK, sprintf("%s min/max/avg=%s/%s/%s",
+			$info->{$key}->{protocolName},
+			$info->{$key}->{latencyMin} / 10 ** 6,
+			$info->{$key}->{latencyMax} / 10 ** 6,
+			$info->{$key}->{latencyAverage} / 10 ** 6,
+		));
+		$np->add_perfdata(
+			label => $np->opts->protocol ? 'latency min' : sprintf("%s latency min", $info->{$key}->{protocolName}),
+			value => $info->{$key}->{latencyMin} / 10 ** 6,
+			uom => 's',
+			min => 0
+		);
+		$np->add_perfdata(
+			label => $np->opts->protocol ? 'latency max' : sprintf("%s latency max", $info->{$key}->{protocolName}),
+			value => $info->{$key}->{latencyMax} / 10 ** 6,
+			uom => 's',
+			min => 0
+		);
+		$np->add_perfdata(
+			label => $np->opts->protocol ? 'latency average' : sprintf("%s latency average", $info->{$key}->{protocolName}),
+			value => $info->{$key}->{latencyAverage} / 10 ** 6,
+			uom => 's',
+			min => 0
+		);
+	}
+
+	$np->nagios_die("protocol not found") if !$found;
+}
+
+sub mode_node_ifs_bandwidth($$)
+{
+	my $np = shift or die;
+	my $snmp_session = shift or die;
+
+	&set_modename($np, 'ifs bandwidth');
+	my $info = &get_request($np, $snmp_session, [
+		$OIDS->{NodeIFSInBPS},
+		$OIDS->{NodeIFSOutBPS},
+	]);
+
+	my $code;
+
+	$code = $np->check_threshold(check => $info->{$OIDS->{NodeIFSInBPS}}, warning => $np->opts->warning, critical => $np->opts->critical);
+	$np->add_message($code, 'Input rate out of limits') if ($code != OK);
+	$code = $np->check_threshold(check => $info->{$OIDS->{NodeIFSOutBPS}}, warning => $np->opts->warning, critical => $np->opts->critical);
+	$np->add_message($code, 'Output rate out of limits') if ($code != OK);
+
+	$np->add_message(OK, sprintf('Node IFS in=%sbps out=%sbps',
+		&unit_value($info->{$OIDS->{NodeIFSInBPS}}),
+		&unit_value($info->{$OIDS->{NodeIFSOutBPS}})
+	));
+	$np->add_perfdata(label => 'bps in', value => $info->{$OIDS->{NodeIFSInBPS}}, uom => 'b', min => 0);
+	$np->add_perfdata(label => 'bps out', value => $info->{$OIDS->{NodeIFSOutBPS}}, uom => 'b', min => 0);
+}
+
+sub mode_node_fans($$)
+{
+	my $np = shift or die;
+	my $snmp_session = shift or die;
+
+	&set_modename($np, 'fans');
+	&check_absotable($np, $snmp_session, 'NodeFanTable', 'FanDescription', 'FanSpeed', 'RPM');
+}
+
+sub mode_node_temp($$)
+{
+	my $np = shift or die;
+	my $snmp_session = shift or die;
+
+	&set_modename($np, 'temp');
+	&check_absotable($np, $snmp_session, 'NodeTempTable', 'TempSensorDescription', 'TempSensorValue', '°C');
+}
+
+sub mode_node_power($$)
+{
+	my $np = shift or die;
+	my $snmp_session = shift or die;
+
+	&set_modename($np, 'power');
+	if (($np->opts->warning && $np->opts->warning !~ /^\d+$/) || ($np->opts->critical && $np->opts->critical !~ /^\d+$/))
+	{ $np->nagios_die('in node-power mode, warning and critical values must be integers stating acceptable % voltage bias'); }
+
+	&check_powertable($np, $snmp_session, 'NodePowerTable', 'PowerSensorDescription', 'PowerSensorValue', 'V');
+}
+
+sub mode_node_disk_bandwidth($$)
+{
+	my $np = shift or die;
+	my $snmp_session = shift or die;
+
+	&set_modename($np, 'disk bandwidth');
+	my ($maxin, $maxout, $avgin, $avgout, $minin, $minout) = (0) x 6;
+	my $info = &table_request($np, $snmp_session, $OIDS->{NodeDiskPerfTable}, $COLUMNS->{NodeDiskPerfTableBandwidth});
+
+	foreach my $key (sort keys %$info)
+	{
+		$maxin = $info->{$key}->{diskPerfInBitsPerSecond} if $info->{$key}->{diskPerfInBitsPerSecond} > $maxin;
+		$maxout = $info->{$key}->{diskPerfOutBitsPerSecond} if $info->{$key}->{diskPerfOutBitsPerSecond} > $maxout;
+
+		$minin = $info->{$key}->{diskPerfInBitsPerSecond} if $info->{$key}->{diskPerfInBitsPerSecond} < $minin;
+		$minout = $info->{$key}->{diskPerfOutBitsPerSecond} if $info->{$key}->{diskPerfOutBitsPerSecond} < $minout;
+
+		$avgin += $info->{$key}->{diskPerfInBitsPerSecond};
+		$avgout += $info->{$key}->{diskPerfOutBitsPerSecond};
+	}
+
+	my $nbdisks = scalar(keys %$info);
+
+	if ($nbdisks)
+	{
+		($avgin, $avgout) = map { $_ /= $nbdisks } ($avgin, $avgout);
+
+		$np->add_perfdata(label => 'max bps in', value => $maxin, uom => 'b', min => 0);
+		$np->add_perfdata(label => 'max bps out', value => $maxout, uom => 'b', min => 0);
+
+		$np->add_perfdata(label => 'average bps in', value => $avgin, uom => 'b', min => 0);
+		$np->add_perfdata(label => 'average bps out', value => $avgout, uom => 'b', min => 0);
+
+		$np->add_perfdata(label => 'min bps in', value => $minin, uom => 'b', min => 0);
+		$np->add_perfdata(label => 'min bps out', value => $minout, uom => 'b', min => 0);
+	}
+
+
+	$np->add_message(OK, sprintf('disk bandwidth min/max/avg in=%s/%s/%s out=%s/%s/%s',
+		&unit_value($minin),
+		&unit_value($maxin),
+		&unit_value($avgin),
+		&unit_value($minout),
+		&unit_value($maxout),
+		&unit_value($avgout),
+	));
+
+	my ($code, $val);
+	$val = ($maxin > $maxout ? $maxin : $maxout);
+	$code = $np->check_threshold(check => $val, warning => $np->opts->warning, critical => $np->opts->critical);
+	$np->add_message($code, 'maximum disk bandwidth out of limits') if ($code != OK);
+	$val = ($minin > $minout ? $minout : $minin);
+	$code = $np->check_threshold(check => $val, warning => $np->opts->warning, critical => $np->opts->critical);
+	$np->add_message($code, 'minimum disk bandwidth out of limits') if ($code != OK);
+}
+
+sub mode_node_disk_ops($$)
+{
+	my $np = shift or die;
+	my $snmp_session = shift or die;
+
+	&set_modename($np, 'disk ops');
+	my ($maxops, $avgops, $minops) = (0) x 3;
+	my $info = &table_request($np, $snmp_session, $OIDS->{NodeDiskPerfTable}, $COLUMNS->{NodeDiskPerfTableOps});
+
+	foreach my $key (sort keys %$info)
+	{
+		$maxops = $info->{$key}->{diskPerfOpsPerSecond} if $info->{$key}->{diskPerfOpsPerSecond} > $maxops;
+		$avgops += $info->{$key}->{diskPerfOpsPerSecond};
+	}
+
+	my $nbdisks = scalar(keys %$info);
+
+	if ($nbdisks)
+	{
+		$avgops /= $nbdisks;
+		$np->add_perfdata(label => 'disk max ops', value => $maxops, uom => '', min => 0);
+		$np->add_perfdata(label => 'disk average ops', value => $avgops, uom => '', min => 0);
+		$np->add_perfdata(label => 'disk min ops', value => $minops, uom => '', min => 0);
+	}
+
+	$np->add_message(OK, sprintf('disk ops/s min/max/avg ops=%s/%s/%s',
+		&unit_value($minops),
+		&unit_value($maxops),
+		&unit_value($avgops),
+	));
+
+	my $code;
+	$code = $np->check_threshold(check => $minops, warning => $np->opts->warning, critical => $np->opts->critical);
+	$np->add_message($code, "minimum disk ops out of limits") if ($code != OK);
+	$code = $np->check_threshold(check => $maxops, warning => $np->opts->warning, critical => $np->opts->critical);
+	$np->add_message($code, "maximum disk ops out of limits") if ($code != OK);
+}
+
+sub mode_node_disk_health($$)
+{
+	my $np = shift or die;
+	my $snmp_session = shift or die;
+
+	&set_modename($np, 'disk health');
+	my $nbdisks = 0;
+	my $info = &table_request($np, $snmp_session, $OIDS->{NodeDiskHealthTable}, $COLUMNS->{NodeDiskHealthTable});
+
+	foreach my $key (sort keys %$info)
+	{
+		if ($info->{$key}->{diskStatus} ne 'HEALTHY')
+		{
+			$np->add_message(CRITICAL, sprintf("Disk %s is %s",
+				$info->{$key}->{diskBay},
+				$info->{$key}->{diskStatus},
+			));
+		}
+		else
+		{
+			$nbdisks++;
+		}
+	}
+
+	$np->add_message(OK, sprintf("%s disks", $nbdisks));
+
+	$np->nagios_die("warning and critical not supported in this mode") if ($np->opts->warning || $np->opts->critical);
+}
+
+my $MODEFUNCS = {
+	'cluster-health' => \&mode_cluster_health,
+	'cluster-network-bandwidth' => \&mode_cluster_network_bandwidth,
+	'cluster-cpu-usage' => \&mode_cluster_cpu_usage,
+	'cluster-ifs-bandwidth' => \&mode_cluster_ifs_bandwidth,
+	'cluster-ifs-space' => \&mode_cluster_ifs_space,
+	#'cluster-license' => \&mode_cluster_license,
+	# quota
+
+	'node-health' => \&mode_node_health,
+	'node-network-bandwidth' => \&mode_node_network_bandwidth,
+	'node-cpu-usage' => \&mode_node_cpu_usage,
+	'node-ifs-bandwidth' => \&mode_node_ifs_bandwidth,
+
+	'node-disk-ops' => \&mode_node_disk_ops,
+	'node-disk-bandwidth' => \&mode_node_disk_bandwidth,
+	'node-disk-health' => \&mode_node_disk_health,
+
+	'node-protocol-ops' => \&mode_node_protocol_ops,
+	'node-protocol-bandwidth' => \&mode_node_protocol_bandwidth,
+	'node-protocol-latency' => \&mode_node_protocol_latency,
+
+	'node-hardware-fans' => \&mode_node_fans,
+	'node-hardware-temp' => \&mode_node_temp,
+	'node-hardware-power' => \&mode_node_power,
+
+};
+
+#----------------------------------------
+# Main Program
+#----------------------------------------
+
+my $np = Nagios::Plugin->new(
+	shortname => 'ISILON',
+	usage => "usage: check_isilon <options> -H <host_address> -m <mode>\n   use --help for more info",
+	plugin => 'ISILON',
+	version => '0.1'
+);
+
+#----------------------------------------
+# Option Parsing
+#----------------------------------------
+
+$np->add_arg(
+	spec => 'hostname|H=s',
+	help => "-H, --hostname=<host_address>\n   Hostname to check",
+	required => 1,
+	default => '127.0.0.1'
+);
+
+$np->add_arg(
+	spec => 'port|p=s',
+	help => "-p, --port=<snmp_port>\n   SNMP port (default: 161)",
+	default => 161,
+);
+
+# IPv4/IPv6
+
+$np->add_arg(
+	spec => 'ipv4|4',
+	help => "-4\n   use IPv4 (default)",
+);
+
+$np->add_arg(
+	spec => 'ipv6|6',
+	help => "-6\n   use IPv6",
+);
+
+# SNMPv1/2
+
+$np->add_arg(
+	spec => 'snmpprotocol=s',
+	help => "--snmpprotocol=[1|2|3]\n   SNMP protocol version (default=2) ('2c' also accepted)",
+	required => 1,
+	default => 2,
+);
+
+# SNMPv1/2
+
+$np->add_arg(
+	spec => 'community|C=s',
+	help => "-C, --community=<snmp_community>\n   SNMP community (SNMP version 1 or 2 only)",
+	required => 1,
+	default => 'public',
+);
+
+# SNMPv3
+
+$np->add_arg(
+	spec => 'username=s',
+	help => "--username=<snmp_username>\n   SNMP username (SNMP version 3)",
+);
+
+$np->add_arg(
+	spec => 'authkey=s',
+	help => "--authkey=<snmp_authkey>\n   SNMP authkey (SNMP version 3)",
+);
+
+$np->add_arg(
+	spec => 'authpassword=s',
+	help => "--authpassord=<snmp_authpassword>\n   SNMP authpassword (SNMP version 3)",
+);
+
+$np->add_arg(
+	spec => 'authprotocol=s',
+	help => "--authprotocol=<snmp_authprotocol>\n   SNMP authprotocol (SNMP version 3)",
+);
+
+$np->add_arg(
+	spec => 'privkey=s',
+	help => "--privkey=<snmp_privkey>\n   SNMP privkey (SNMP version 3)",
+);
+
+$np->add_arg(
+	spec => 'privpassword=s',
+	help => "--privpassword=<snmp_privpassword>\n   SNMP privpassword (SNMP version 3)",
+	default => undef
+);
+
+$np->add_arg(
+	spec => 'privprotocol=s',
+	help => "--privprotocol=<snmp_privprotocol>\n   SNMP privprotocol (SNMP version 3)",
+);
+
+# other
+
+$np->add_arg(
+	spec => 'noperfdata|F',
+	help => "-F, --noperfdata\n   Don't output performance data",
+);
+
+$np->add_arg(
+	spec => 'mode|m=s',
+	help => "--mode, -m=<mode>\n   Operation Mode. Available modes are :\n"
+		. "     - " . join("\n     - ", sort keys %$MODEFUNCS) . "\n",
+#		. "     cluster-general: Cluster health and available nodes (example: -m cluster-general)\n"
+#		. "     cluster-network: Cluster Network IO (example: -m cluster-network -w <min traffic>:<max traffic>)\n"
+#		. "     cluster-cpu: Cluster CPU Usage, checks CPU Idle (example: -m cluster-cpu -w 10 -c 5)\n"
+#		. "     cluster-ifs-io: Cluster IFS IO (example: -m cluster-ifs-io -c 1:)\n"
+#		. "     cluster-ifs-space: Cluster IFS Space Usage (example: -m cluster-ifs-space -w 90 -c 95)\n"
+#		. "     node-fans: Fan speed checks (example: -m node-fans -w 100:10000 -c 1:)\n"
+#		. "     node-temp: Sensors temperature checks (example: -m node-temp -w 20:50 -c 0:60)\n",
+	required => 1,
+);
+
+$np->add_arg(
+	spec => 'warning|w=s',
+	help => "-w, --warning=<threshold>\n  TODO\n",
+);
+
+$np->add_arg(
+	spec => 'critical|c=s',
+	help => "-c, --critical=<threshold>\n  TODO\n",
+);
+
+$np->add_arg(
+	spec => 'protocol|P=s',
+	help => "--protocol, -P=<protocol>\n   Protocol\n",
+);
+
+$np->getopts();
+
+# Safety Net
+alarm $np->opts->timeout;
+
+#----------------------------------------
+# IP Transport Domain
+#----------------------------------------
+
+my $domain = 'udp4';
+
+if (defined $np->opts->ipv6)
+{
+	if (defined $np->opts->ipv4)
+	{
+		$np->nagios_die('options -4 and -6 are mutually exclusive');
+	}
+	$domain = 'udp6';
+}
+
+#----------------------------------------
+# SNMP Session
+#----------------------------------------
+
+my ($snmp_session, $snmp_error);
+
+if ($np->opts->snmpprotocol eq '1'
+	|| $np->opts->snmpprotocol eq '2'
+	|| $np->opts->snmpprotocol eq '2c')
+{
+	($snmp_session, $snmp_error) = Net::SNMP->session(
+		-hostname => $np->opts->hostname,
+		-port => $np->opts->port,
+		-domain => $domain,
+		-version => ($np->opts->snmpprotocol eq '2c' ? '2' : $np->opts->snmpprotocol),
+		-community => $np->opts->community,
+		-maxmsgsize => 65535,
+	);
+}
+elsif ($np->opts->snmpprotocol eq '3')
+{
+	($snmp_session, $snmp_error) = Net::SNMP->session(
+		-hostname => $np->opts->hostname,
+		-port => $np->opts->port,
+		-domain => $domain,
+		-version => $np->opts->snmpprotocol,
+		-username => $np->opts->username,
+		-authkey => $np->opts->authkey,
+		-authpassword => $np->opts->authpassword,
+		-authprotocol => $np->opts->authprotocol,
+		-privkey => $np->opts->privkey,
+		-privpassword => $np->opts->privpassword,
+		-privprotocol => $np->opts->privprotocol,
+		-maxmsgsize => 65535,
+	);
+}
+else
+{
+	$np->nagios_die("invalid snmp protocol");
+}
+
+$np->nagios_die($snmp_error) if (!defined $snmp_session);
+
+#----------------------------------------
+# The Real Work
+#----------------------------------------
+
+printf("DEBUG: available modes: %s\n", join(', ', sort keys %$MODEFUNCS)) if $np->opts->verbose > 2;
+
+if (defined ($MODEFUNCS->{$np->opts->mode}))
+{
+	&{$MODEFUNCS->{$np->opts->mode}}($np, $snmp_session);
+}
+else
+{
+	$np->nagios_die("unknown mode: '" . $np->opts->mode . "'");
+}
+
+my ($exit_code, $exit_message) = $np->check_messages(join => ', ', join_all => ', ' );
+$exit_message =~ s/^ *//;
+$np->nagios_exit($exit_code, $exit_message);
