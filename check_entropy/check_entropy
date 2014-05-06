@@ -1,0 +1,82 @@
+#!/usr/bin/perl
+#
+#    check_entropy nagios plugin
+#    Copyright (C) 2014 Nicolas Limage
+#
+#    This program is free software: you can redistribute it and/or modify
+#    it under the terms of the GNU General Public License as published by
+#    the Free Software Foundation, either version 3 of the License, or
+#    (at your option) any later version.
+#
+#    This program is distributed in the hope that it will be useful,
+#    but WITHOUT ANY WARRANTY; without even the implied warranty of
+#    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#    GNU General Public License for more details.
+#
+#    You should have received a copy of the GNU General Public License
+#    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+#
+use strict;
+use warnings;
+use Nagios::Plugin;
+
+my $np = Nagios::Plugin->new(
+	shortname => 'ENTROPY',
+	usage => "usage: check_entropy",
+	plugin => 'ENTROPY',
+	version => '1.0'
+);
+
+#----------------------------------------
+# Option Parsing
+#----------------------------------------
+
+$np->add_arg(
+  spec => 'warning|w=s',
+  help => "-w, --warn=INTEGER:INTEGER\n   the warning threshold\n"
+              . " See http://nagiosplug.sourceforge.net/developer-guidelines.html#THRESHOLDFORMAT "
+              . "for the threshold format. ",
+);
+
+$np->add_arg(
+  spec => 'critical|c=s',
+  help => "-c, --critical=INTEGER:INTEGER\n   the critical threshold\n"
+              . " See http://nagiosplug.sourceforge.net/developer-guidelines.html#THRESHOLDFORMAT "
+              . "for the threshold format. ",
+);
+
+$np->getopts();
+
+# Safety Net
+alarm $np->opts->timeout;
+
+#----------------------------------------
+# Probing Values
+#----------------------------------------
+
+my $fd;
+open($fd, '<', '/proc/sys/kernel/random/entropy_avail') or $np->nagios_die("unable to open /proc/sys/kernel/random/entropy_avail: $!");
+my $value = <$fd>;
+close $fd;
+chomp $value;
+$value =~ m/^\d+$/ or $np->nagios_die("invalid value: $value");
+
+#----------------------------------------
+# Health Checks
+#----------------------------------------
+my $code;
+
+$code = $np->check_threshold(check => $value, warning => $np->opts->warning, critical => $np->opts->critical);
+$np->add_message($code, sprintf("entropy available: %s", $value));
+
+#----------------------------------------
+# Performance Data
+#----------------------------------------
+
+$np->add_perfdata(label => "entropy", value => $value);
+
+#----------------------------------------
+# Status Checks
+#----------------------------------------
+my ($exit_code, $exit_message) = $np->check_messages(join => ', ');
+$np->nagios_exit($exit_code, $exit_message);

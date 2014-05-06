@@ -1,0 +1,107 @@
+#!/usr/bin/perl
+#
+#    check_sysctl nagios plugin
+#    Copyright (C) 2014 Nicolas Limage
+#
+#    This program is free software: you can redistribute it and/or modify
+#    it under the terms of the GNU General Public License as published by
+#    the Free Software Foundation, either version 3 of the License, or
+#    (at your option) any later version.
+#
+#    This program is distributed in the hope that it will be useful,
+#    but WITHOUT ANY WARRANTY; without even the implied warranty of
+#    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#    GNU General Public License for more details.
+#
+#    You should have received a copy of the GNU General Public License
+#    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+#
+use strict;
+use warnings;
+use Nagios::Plugin;
+
+my $np = Nagios::Plugin->new(
+	shortname => 'SYSCTL',
+	usage => "usage: %s [-w WARNING] [-c CRITICAL] -k SYSCTL_KEY [-k SYSCTL_KEY2 ...]",
+	plugin => 'SYSCTL',
+	version => '1.0'
+);
+
+#----------------------------------------
+# Option Parsing
+#----------------------------------------
+
+$np->add_arg(
+  spec => 'warning|w=s',
+  help => "-w, --warn=INTEGER:INTEGER\n   the warning threshold\n"
+              . " See http://nagiosplug.sourceforge.net/developer-guidelines.html#THRESHOLDFORMAT "
+              . "for the threshold format. ",
+);
+
+$np->add_arg(
+  spec => 'critical|c=s',
+  help => "-c, --critical=INTEGER:INTEGER\n   the critical threshold\n"
+              . " See http://nagiosplug.sourceforge.net/developer-guidelines.html#THRESHOLDFORMAT "
+              . "for the threshold format. ",
+);
+
+$np->add_arg(
+  spec => 'perfdata|p',
+  help => "-p, --perfdata\n   enable perfdata\n",
+);
+
+$np->add_arg(
+  spec => 'key|k=s@',
+  help => "-k KEY, --key KEY\n   the sysctl key to lookup (can be used multiple times)\n",
+  required => 1,
+);
+
+$np->getopts();
+
+# Safety Net
+alarm $np->opts->timeout;
+sub log_debug($) { print((shift) . "\n"); }
+
+#----------------------------------------
+# Probing Values
+#----------------------------------------
+
+foreach my $key (@{$np->opts->key})
+{
+  if ($key !~ /^[a-z0-9._-]+$/)
+    { $np->nagios_die(sprintf("'%s' is not a valid sysctl key name", $key)); }
+}
+
+my $cmd = sprintf("sysctl %s\n", join(" ", @{$np->opts->key}));
+my $out = `$cmd`;
+$np->nagios_die("err: $!") if $!;
+
+my $values = {};
+foreach (split(/\n/, $out))
+{
+  if (/^(\S+) = (\S+)$/)
+    { $values->{$1} = $2; }
+  else
+    { $np->nagios_die("err: malformed line: $_"); }
+}
+
+#----------------------------------------
+# Health Checks + Performance Data
+#----------------------------------------
+
+my $code;
+foreach my $key (@{$np->opts->key})
+{
+  if (!defined $values->{$key})
+    { $np->nagios_die(sprintf("no value found for key '%s'", $key)); }
+
+  $code = $np->check_threshold(check => $values->{$key}, warning => $np->opts->warning, critical => $np->opts->critical);
+  $np->add_message($code, sprintf("%s = %s", $key, $values->{$key}));
+  $np->add_perfdata(label => $key, value => $values->{$key}) if $np->opts->perfdata;
+}
+
+#----------------------------------------
+# Status Checks
+#----------------------------------------
+my ($exit_code, $exit_message) = $np->check_messages(join => ', ');
+$np->nagios_exit($exit_code, $exit_message);
