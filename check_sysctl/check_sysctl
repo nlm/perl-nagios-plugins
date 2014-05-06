@@ -1,7 +1,7 @@
 #!/usr/bin/perl
 #
-#    check_iet nagios plugin
-#    Copyright (C) 2012 Nicolas Limage
+#    check_sysctl nagios plugin
+#    Copyright (C) 2014 Nicolas Limage
 #
 #    This program is free software: you can redistribute it and/or modify
 #    it under the terms of the GNU General Public License as published by
@@ -18,12 +18,11 @@
 #
 use strict;
 use warnings;
-#use lib '/usr/lib/nagios/plugins/lib';
 use Nagios::Plugin;
 
 my $np = Nagios::Plugin->new(
 	shortname => 'SYSCTL',
-	usage => "usage: check_sysctl",
+	usage => "usage: %s [-w WARNING] [-c CRITICAL] -k SYSCTL_KEY [-k SYSCTL_KEY2 ...]",
 	plugin => 'SYSCTL',
 	version => '1.0'
 );
@@ -47,13 +46,14 @@ $np->add_arg(
 );
 
 $np->add_arg(
-  spec => 'key|k=s',
-  help => "-k, --key=KEY\n   the sysctl key to consider\n",
+  spec => 'perfdata|p',
+  help => "-p, --perfdata\n   enable perfdata\n",
 );
 
 $np->add_arg(
-  spec => 'perfdata|p',
-  help => "-p, --perfdata\n   enable perfdata\n"
+  spec => 'key|k=s@',
+  help => "-k KEY, --key KEY\n   the sysctl key to lookup (can be used multiple times)\n",
+  required => 1,
 );
 
 $np->getopts();
@@ -62,44 +62,46 @@ $np->getopts();
 alarm $np->opts->timeout;
 sub log_debug($) { print((shift) . "\n"); }
 
-if ($np->opts->key !~ /^[a-z0-9._-]+$/)
-{
-  $np->nagios_die(sprintf("'%s' is not a valid sysctl key", $np->opts->key));
-}
-
 #----------------------------------------
 # Probing Values
 #----------------------------------------
 
-my $out = `sysctl $np->opts->key`;
-my $value;
-
-if ($out =~ /^(\S+) = (\d+)$/)
+foreach my $key (@{$np->opts->key})
 {
-  $value = $2;
+  if ($key !~ /^[a-z0-9._-]+$/)
+    { $np->nagios_die(sprintf("'%s' is not a valid sysctl key name", $key)); }
 }
-else
+
+my $cmd = sprintf("sysctl %s\n", join(" ", @{$np->opts->key}));
+my $out = `$cmd`;
+$np->nagios_die("err: $!") if $!;
+
+my $values = {};
+foreach (split(/\n/, $out))
 {
-  $np->nagios_die("invalid sysctl output");
+  if (/^(\S+) = (\S+)$/)
+    { $values->{$1} = $2; }
+  else
+    { $np->nagios_die("err: malformed line: $_"); }
 }
 
 #----------------------------------------
-# Health Checks
+# Health Checks + Performance Data
 #----------------------------------------
+
 my $code;
+foreach my $key (@{$np->opts->key})
+{
+  if (!defined $values->{$key})
+    { $np->nagios_die(sprintf("no value found for key '%s'", $key)); }
 
-$code = $np->check_threshold(check => $value, warning => $np->opts->warning, critical => $np->opts->critical);
-$np->add_message($code, sprintf("%s = %s", $np->opts->key, $value)) if ($code != OK);
-
-#----------------------------------------
-# Performance Data
-#----------------------------------------
-
-$np->add_perfdata(label => $np->opts->key, value => $value);
+  $code = $np->check_threshold(check => $values->{$key}, warning => $np->opts->warning, critical => $np->opts->critical);
+  $np->add_message($code, sprintf("%s = %s", $key, $values->{$key}));
+  $np->add_perfdata(label => $key, value => $values->{$key}) if $np->opts->perfdata;
+}
 
 #----------------------------------------
 # Status Checks
 #----------------------------------------
-$np->add_message(OK, sprintf("%s = %s", $np->opts->key, $value));
 my ($exit_code, $exit_message) = $np->check_messages(join => ', ');
 $np->nagios_exit($exit_code, $exit_message);
