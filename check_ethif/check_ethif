@@ -1,0 +1,184 @@
+#!/usr/bin/env perl
+#
+#    check_ethif nagios plugin
+#    Copyright (C) 2014 Nicolas Limage
+#    Nagios plugin to check a linux network interface status
+#
+#    This program is free software: you can redistribute it and/or modify
+#    it under the terms of the GNU General Public License as published by
+#    the Free Software Foundation, either version 3 of the License, or
+#    (at your option) any later version.
+#
+#    This program is distributed in the hope that it will be useful,
+#    but WITHOUT ANY WARRANTY; without even the implied warranty of
+#    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#    GNU General Public License for more details.
+#
+#    You should have received a copy of the GNU General Public License
+#    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+#
+use strict;
+use warnings;
+use 5.008;
+use Nagios::Plugin;
+
+my $np = Nagios::Plugin->new(
+    shortname => 'ETHIF',
+    usage => "usage: %s INTERFACE [INTERFACE ...]",
+    plugin => 'SYSCTL',
+    version => '1.0'
+);
+
+#----------------------------------------
+# Option Parsing
+#----------------------------------------
+
+$np->add_arg(
+  spec => 'carrier|c=s',
+  help => "-c, --carrier=up|down\ndesired carrier status (default up)\n",
+  default => 'up',
+);
+
+$np->add_arg(
+  spec => 'duplex|d=s',
+  help => "-d, --duplex=full|half\ndesired duplex status (default=full)\n",
+  default => 'full',
+);
+
+$np->add_arg(
+  spec => 'mtu|m=i',
+  help => "-m, --mtu=MTU\ndesired minimal mtu\n",
+  default => 1500,
+);
+
+$np->add_arg(
+  spec => 'operstate|o=s',
+  help => "-o, --operstate=state\ndesired operational status\nRFC 2863 operstate\n",
+  default => 'up',
+);
+
+$np->add_arg(
+  spec => 'speed|s=i',
+  help => "-s, --speed=state\ndesired link speed in MB/s\n",
+  default => 1000,
+);
+
+$np->getopts();
+
+# Safety Net
+alarm $np->opts->timeout;
+
+#----------------------------------------
+# Probing Values
+#----------------------------------------
+
+sub get_line($)
+{
+  defined (my $filename = shift) or die;
+
+  my $fd;
+  if (!open($fd, '<', $filename))
+    { return "" }
+  my $line = <$fd>;
+  close($fd);
+  chomp($line);
+  return $line;
+}
+
+#----------------------------------------
+# Health Checks
+#----------------------------------------
+
+foreach my $interface (@ARGV)
+{
+  if ($interface !~ /^[a-zA-Z0-9:.]+$/)
+    { $np->nagios_die(sprintf("'%s' is not a valid interface name", $interface)); }
+
+  my $dir = sprintf("/sys/class/net/%s", $interface);
+
+    if (!-d $dir)
+    { $np->nagios_die(sprintf("'%s' interface does not exist", $interface)); }
+
+  my $errors = 0;
+
+  # Operational Status
+  my $operstate_status = get_line("$dir/operstate");
+  if (defined($np->opts->operstate))
+  {
+    if ($operstate_status ne $np->opts->operstate)
+    {
+      $np->add_message(CRITICAL, sprintf("%s state=%s",
+        $interface,
+        $operstate_status,
+        $np->opts->operstate
+      ));
+    }
+  }
+
+  # Carrier Status
+  my $carrier_status = get_line("$dir/carrier");
+  if (defined($np->opts->carrier))
+  {
+    if (!(($np->opts->carrier eq 'up' and $carrier_status eq '1')
+      or ($np->opts->carrier eq 'down' and $carrier_status eq '0')))
+    {
+      $np->add_message(CRITICAL, sprintf("%s link=%s (should be %s)",
+        $interface,
+        ($carrier_status eq '1' ? 'up' : 'down'),
+        $np->opts->carrier
+      ));
+    }
+  }
+
+  # Speed
+  my $speed_status = get_line("$dir/speed");
+  if (defined($np->opts->speed))
+  {
+    if ($speed_status < $np->opts->speed)
+    {
+      $np->add_message(CRITICAL, sprintf("%s speed=%s (should be >= %s)",
+        $interface,
+        $speed_status,
+        $np->opts->speed,
+      ));
+    }
+  }
+
+  # Duplex
+  my $duplex_status = get_line("$dir/duplex");
+  if (defined($np->opts->duplex))
+  {
+    if ($duplex_status ne $np->opts->duplex)
+    {
+      $np->add_message(CRITICAL, sprintf("%s duplex=%s (should be %s)",
+        $interface,
+        $duplex_status,
+        $np->opts->duplex,
+      ));
+    }
+  }
+
+  # MTU
+  my $mtu_status = get_line("$dir/mtu");
+  if (defined($np->opts->mtu))
+  {
+    if ($mtu_status < $np->opts->mtu)
+    {
+      $np->add_message(CRITICAL, sprintf("%s mtu=%s (should be %s)",
+        $interface,
+        $mtu_status,
+        $np->opts->mtu,
+      ));
+    }
+  }
+
+  $np->add_message(OK, sprintf("%s [admin=%s, link=%s, speed=%s, duplex=%s, mtu=%s]",
+      $interface, $operstate_status, ($carrier_status == 1 ? 'up' : 'down'),
+      $speed_status, $duplex_status, $mtu_status));
+}
+
+#----------------------------------------
+# Status Checks
+#----------------------------------------
+my ($exit_code, $exit_message) = $np->check_messages(join => ', ');
+$np->nagios_exit($exit_code, $exit_message);
