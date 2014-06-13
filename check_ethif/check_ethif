@@ -25,8 +25,8 @@ use Nagios::Plugin;
 my $np = Nagios::Plugin->new(
     shortname => 'ETHIF',
     usage => "usage: %s INTERFACE [INTERFACE ...]",
-    plugin => 'SYSCTL',
-    version => '1.0'
+    plugin => 'ETHIF',
+    version => '1.1'
 );
 
 #----------------------------------------
