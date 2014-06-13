@@ -35,32 +35,49 @@ my $np = Nagios::Plugin->new(
 
 $np->add_arg(
   spec => 'carrier|c=s',
-  help => "-c, --carrier=up|down\ndesired carrier status (default up)\n",
+  help => "-c, --carrier=up|down\n    desired carrier status (default up)",
   default => 'up',
 );
 
 $np->add_arg(
   spec => 'duplex|d=s',
-  help => "-d, --duplex=full|half\ndesired duplex status (default=full)\n",
+  help => "-d, --duplex=full|half\n    desired duplex status (default=full)",
   default => 'full',
 );
 
 $np->add_arg(
-  spec => 'mtu|m=i',
-  help => "-m, --mtu=MTU\ndesired minimal mtu\n",
-  default => 1500,
+  spec => 'mtu|m=s',
+  help => "-m, --mtu=RANGE\n    desired mtu value (default=1500:1500)\n"
+    . "    (see https://nagios-plugins.org/doc/guidelines.html#THRESHOLDFORMAT)",
+  default => '1500:1500',
 );
 
 $np->add_arg(
   spec => 'operstate|o=s',
-  help => "-o, --operstate=state\ndesired operational status\nRFC 2863 operstate\n",
+  help => "-o, --operstate=state\n    desired operational status (default=up)\n" .
+    "    RFC 2863 operstate:\n" .
+    '    "unknown", "notpresent", "down", "lowerlayerdown", ' .
+    '"testing", "dormant", "up"',
   default => 'up',
 );
 
 $np->add_arg(
-  spec => 'speed|s=i',
-  help => "-s, --speed=state\ndesired link speed in MB/s\n",
-  default => 1000,
+  spec => 'speed|s=s',
+  help => "-s, --speed=RANGE\n    desired link speed in MB/s\n"
+    . "    (see https://nagios-plugins.org/doc/guidelines.html#THRESHOLDFORMAT)",
+  default => '1000:',
+);
+
+$np->add_arg(
+  spec => 'ipv4|4=s',
+  help => "-4, --ipv4=RANGE\n    number of ipv4 addresses on this interface",
+  default => '1:',
+);
+
+$np->add_arg(
+  spec => 'ipv6|6=s',
+  help => "-6, --inet6=RANGE\n    number of ipv6 addresses on this interface",
+  default => '0:',
 );
 
 $np->getopts();
@@ -72,15 +89,18 @@ alarm $np->opts->timeout;
 # Probing Values
 #----------------------------------------
 
-sub get_line($)
+sub get_line($$)
 {
   defined (my $filename = shift) or die;
+  defined (my $default = shift) or die;
 
   my $fd;
   if (!open($fd, '<', $filename))
-    { return "" }
+    { return $default; }
   my $line = <$fd>;
   close($fd);
+  if (!$line)
+    { return $default; }
   chomp($line);
   return $line;
 }
@@ -89,6 +109,8 @@ sub get_line($)
 # Health Checks
 #----------------------------------------
 
+$np->nagios_die('no interface name given') if scalar(@ARGV) < 1;
+
 foreach my $interface (@ARGV)
 {
   if ($interface !~ /^[a-zA-Z0-9:.]+$/)
@@ -96,18 +118,18 @@ foreach my $interface (@ARGV)
 
   my $dir = sprintf("/sys/class/net/%s", $interface);
 
-    if (!-d $dir)
+  if (!-d $dir)
     { $np->nagios_die(sprintf("'%s' interface does not exist", $interface)); }
 
   my $errors = 0;
 
   # Operational Status
-  my $operstate_status = get_line("$dir/operstate");
+  my $operstate_status = get_line("$dir/operstate", "down");
   if (defined($np->opts->operstate))
   {
     if ($operstate_status ne $np->opts->operstate)
     {
-      $np->add_message(CRITICAL, sprintf("%s state=%s",
+      $np->add_message(CRITICAL, sprintf("%s state=%s (should be %s)",
         $interface,
         $operstate_status,
         $np->opts->operstate
@@ -116,7 +138,7 @@ foreach my $interface (@ARGV)
   }
 
   # Carrier Status
-  my $carrier_status = get_line("$dir/carrier");
+  my $carrier_status = get_line("$dir/carrier", 0);
   if (defined($np->opts->carrier))
   {
     if (!(($np->opts->carrier eq 'up' and $carrier_status eq '1')
@@ -131,12 +153,12 @@ foreach my $interface (@ARGV)
   }
 
   # Speed
-  my $speed_status = get_line("$dir/speed");
+  my $speed_status = get_line("$dir/speed", 0);
   if (defined($np->opts->speed))
   {
-    if ($speed_status < $np->opts->speed)
+    if ($np->check_threshold(check => $speed_status, critical => $np->opts->speed) != OK)
     {
-      $np->add_message(CRITICAL, sprintf("%s speed=%s (should be >= %s)",
+      $np->add_message(CRITICAL, sprintf("%s speed=%s (should be in range %s)",
         $interface,
         $speed_status,
         $np->opts->speed,
@@ -145,7 +167,7 @@ foreach my $interface (@ARGV)
   }
 
   # Duplex
-  my $duplex_status = get_line("$dir/duplex");
+  my $duplex_status = get_line("$dir/duplex", "");
   if (defined($np->opts->duplex))
   {
     if ($duplex_status ne $np->opts->duplex)
@@ -159,12 +181,12 @@ foreach my $interface (@ARGV)
   }
 
   # MTU
-  my $mtu_status = get_line("$dir/mtu");
+  my $mtu_status = get_line("$dir/mtu", 0);
   if (defined($np->opts->mtu))
   {
-    if ($mtu_status < $np->opts->mtu)
+    if ($np->check_threshold(check => $mtu_status, critical => $np->opts->mtu) != OK)
     {
-      $np->add_message(CRITICAL, sprintf("%s mtu=%s (should be %s)",
+      $np->add_message(CRITICAL, sprintf("%s mtu=%s (should be in range %s)",
         $interface,
         $mtu_status,
         $np->opts->mtu,
@@ -172,9 +194,39 @@ foreach my $interface (@ARGV)
     }
   }
 
-  $np->add_message(OK, sprintf("%s [admin=%s, link=%s, speed=%s, duplex=%s, mtu=%s]",
+  # IPV4
+  my $ipv4_status = `ip -4 addr show scope global dev '$interface' | grep -c inet`;
+  chomp($ipv4_status);
+  if (defined($np->opts->ipv4))
+  {
+    if ($np->check_threshold(check => $ipv4_status, critical => $np->opts->ipv4) != OK)
+    {
+      $np->add_message(CRITICAL, sprintf("%s ipv4=%s (should be in range %s)",
+        $interface,
+        $ipv4_status,
+        $np->opts->ipv4,
+      ));
+    }
+  }
+
+  # IPV6
+  my $ipv6_status = `ip -6 addr show scope global dev '$interface' | grep -c inet`;
+  chomp($ipv6_status);
+  if (defined($np->opts->ipv6))
+  {
+    if ($np->check_threshold(check => $ipv6_status, critical => $np->opts->ipv6) != OK)
+    {
+      $np->add_message(CRITICAL, sprintf("%s ipv6=%s (should be in range %s)",
+        $interface,
+        $ipv6_status,
+        $np->opts->ipv6,
+      ));
+    }
+  }
+
+  $np->add_message(OK, sprintf("%s [ admin=%s, link=%s, speed=%s, duplex=%s, mtu=%s, ipv4=%s, ipv6=%s ]",
       $interface, $operstate_status, ($carrier_status == 1 ? 'up' : 'down'),
-      $speed_status, $duplex_status, $mtu_status));
+      $speed_status, $duplex_status, $mtu_status, $ipv4_status, $ipv6_status));
 }
 
 #----------------------------------------
