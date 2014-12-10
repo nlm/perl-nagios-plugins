@@ -1,0 +1,62 @@
+#!/usr/bin/env perl
+#
+#    check_timezone nagios plugin
+#    Copyright (C) 2014 Nicolas Limage
+#    Nagios plugin to check system timezone
+#
+#    This program is free software: you can redistribute it and/or modify
+#    it under the terms of the GNU General Public License as published by
+#    the Free Software Foundation, either version 3 of the License, or
+#    (at your option) any later version.
+#
+#    This program is distributed in the hope that it will be useful,
+#    but WITHOUT ANY WARRANTY; without even the implied warranty of
+#    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#    GNU General Public License for more details.
+#
+#    You should have received a copy of the GNU General Public License
+#    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+#
+use strict;
+use warnings;
+use 5.008;
+use Nagios::Plugin;
+use POSIX;
+
+my $np = Nagios::Plugin->new(
+    usage => "usage: %s [OPTIONS]",
+);
+
+#----------------------------------------
+# Option Parsing
+#----------------------------------------
+
+$np->add_arg(
+  spec => 'timezone|t=s',
+  help => "-t, --timezone=TIMEZONE\n    the wanted timezone",
+  required => 1,
+);
+
+$np->getopts();
+
+# Safety Net
+alarm $np->opts->timeout;
+
+#----------------------------------------
+# Initializing structs
+#----------------------------------------
+
+my $timezone = strftime("%Z", localtime());
+
+#----------------------------------------
+# Health Checks
+#----------------------------------------
+
+if (uc($np->opts->timezone) eq uc($timezone))
+{
+  $np->nagios_exit(OK, "Timezone is $timezone");
+}
+else
+{
+  $np->nagios_exit(CRITICAL, "Timezone is $timezone (wanted: " . $np->opts->timezone . ")");
+}
