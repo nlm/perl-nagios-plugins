@@ -1,0 +1,79 @@
+#!/usr/bin/env perl
+#
+#    check_tftp nagios plugin
+#    Copyright (C) 2014 Nicolas Limage
+#    Nagios plugin to check a linux network interface status
+#
+#    This program is free software: you can redistribute it and/or modify
+#    it under the terms of the GNU General Public License as published by
+#    the Free Software Foundation, either version 3 of the License, or
+#    (at your option) any later version.
+#
+#    This program is distributed in the hope that it will be useful,
+#    but WITHOUT ANY WARRANTY; without even the implied warranty of
+#    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#    GNU General Public License for more details.
+#
+#    You should have received a copy of the GNU General Public License
+#    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+#
+use strict;
+use warnings;
+use 5.008;
+use Nagios::Plugin;
+use WWW::Curl::Easy;
+
+my $np = Nagios::Plugin->new(
+    usage => "usage: %s -H HOST -f FILE [options]",
+    version => '1.0'
+);
+
+$np->add_arg(
+  spec => 'host|H=s',
+  help => "-H, --host\n    tftp server hostname or address",
+  required => 1,
+);
+
+$np->add_arg(
+  spec => 'file|f=s',
+  help => "-f, --file\n    filename to get",
+  required => 1,
+);
+
+$np->getopts();
+
+# Getting the file
+
+my $curl = WWW::Curl::Easy->new;
+my $url = sprintf('tftp://%s/%s', $np->opts->host, $np->opts->file);
+my $fd;
+open($fd, '>/dev/null') or die;
+
+$curl->setopt(CURLOPT_HEADER, 1);
+$curl->setopt(CURLOPT_URL, $url);
+$curl->setopt(CURLOPT_WRITEDATA, $fd);
+
+# Starts the actual request
+my $retcode = $curl->perform;
+
+# Looking at the results...
+if ($retcode == 0)
+{
+  $np->add_message(OK, sprintf("%s: downloaded %s bytes in %ss (%sB/s)",
+                               $curl->getinfo(CURLINFO_EFFECTIVE_URL),
+                               $curl->getinfo(CURLINFO_SIZE_DOWNLOAD),
+                               $curl->getinfo(CURLINFO_TOTAL_TIME),
+                               $curl->getinfo(CURLINFO_SPEED_DOWNLOAD),
+  ));
+}
+else
+{
+  $np->add_message(CRITICAL, sprintf("error: %s: %s",
+                                     $curl->strerror($retcode),
+                                     $curl->errbuf,
+  ));
+}
+
+close($fd);
+my ($exit_code, $exit_message) = $np->check_messages(join => ', ');
+$np->nagios_exit($exit_code, $exit_message);
