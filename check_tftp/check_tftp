@@ -52,6 +52,11 @@ open($fd, '>/dev/null') or die;
 $curl->setopt(CURLOPT_HEADER, 1);
 $curl->setopt(CURLOPT_URL, $url);
 $curl->setopt(CURLOPT_WRITEDATA, $fd);
+$curl->setopt(CURLOPT_TIMEOUT, $np->opts->timeout);
+
+
+# plugin-wide timeout, just in case
+alarm $np->opts->timeout + 1;
 
 # Starts the actual request
 my $retcode = $curl->perform;
