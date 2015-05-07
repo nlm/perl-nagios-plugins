@@ -24,7 +24,7 @@ use Nagios::Plugin;
 use Net::SNMP;
 use Data::Dumper;
 
-my $STATEDIR = '/var/lib/centreon/centplugins';
+my $STATEDIR = '/var/tmp';
 
 my $OIDS;
 
