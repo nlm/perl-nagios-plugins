@@ -35,20 +35,38 @@ my $np = Nagios::Plugin->new(
 
 $np->add_arg(
 	spec => 'warning|w=s',
-	help => "-w, --warning=INTEGER:INTEGER\n   "
-              . "warning threshold for the number of connections\n "
-              . "See http://nagiosplug.sourceforge.net/"
-              . "developer-guidelines.html#THRESHOLDFORMAT "
-              . "for the threshold format. ",
+	help => "-w, --warning=THRESHOLD\n   "
+          . "warning threshold for the number of connections\n "
+          . "See http://nagiosplug.sourceforge.net/"
+          . "developer-guidelines.html#THRESHOLDFORMAT "
+          . "for the threshold format. ",
 );
 
 $np->add_arg(
 	spec => 'critical|c=s',
-	help => "-c, --critical=INTEGER:INTEGER\n   "
-              . "critical threshold for the number of connections\n "
-              . "See http://nagiosplug.sourceforge.net/"
-              . "developer-guidelines.html#THRESHOLDFORMAT "
-              . "for the threshold format. ",
+	help => "-c, --critical=THRESHOLD\n   "
+          . "critical threshold for the number of connections\n "
+          . "See http://nagiosplug.sourceforge.net/"
+          . "developer-guidelines.html#THRESHOLDFORMAT "
+          . "for the threshold format. ",
+);
+
+$np->add_arg(
+  spec => "wpct|W=i",
+  help => "-W, --wpct=THRESHOLD\n   "
+          . "critical threshold for percentage of "
+          . "the max number of tracked connections\n "
+          . "(relative to net.nf_conntrack_max).",
+  default => 100,
+);
+
+$np->add_arg(
+  spec => "cpct|C=i",
+  help => "-C, --cpct=THRESHOLD\n   "
+          . "warning threshold for percentage of "
+          . "the max number of tracked connections\n "
+          . "(relative to net.nf_conntrack_max).",
+  default => 100,
 );
 
 $np->getopts();
@@ -64,24 +82,38 @@ my $value = `conntrack -C`;
 $value =~ m/^\d+$/ or $np->nagios_die("invalid value: $value");
 $value = int($value);
 
+my $conntrack_max = `sysctl -n net.nf_conntrack_max`;
+$conntrack_max =~ m/^\d+$/ or $np->nagios_die("invalid value: $conntrack_max");
+$conntrack_max = int($conntrack_max);
+
 #----------------------------------------
 # Health Checks
 #----------------------------------------
 
-my $code = $np->check_threshold(check => $value,
-                                warning => $np->opts->warning,
-                                critical => $np->opts->critical);
-$np->add_message($code, sprintf("current connections: %d", $value));
+my $code;
+
+$code = $np->check_threshold(check => $value,
+                             warning => $np->opts->warning,
+                             critical => $np->opts->critical);
+$np->add_message($code, sprintf("current connections: %s", $value));
+
+my $conntrack_pct = 100.0 * $value / $conntrack_max;
+
+$code = $np->check_threshold(check => $conntrack_pct,
+                             warning => $np->opts->wpct,
+                             critical => $np->opts->cpct);
+$np->add_message($code, sprintf("table usage: %02.2f%%", $conntrack_pct));
 
 #----------------------------------------
 # Performance Data
 #----------------------------------------
 
-$np->add_perfdata(label => "connections", value => $value);
+$np->add_perfdata(label => "connections", value => $value,
+                  min => 0, max => $conntrack_max);
 
 #----------------------------------------
 # Finish
 #----------------------------------------
 
-my ($exit_code, $exit_message) = $np->check_messages();
+my ($exit_code, $exit_message) = $np->check_messages(join => ', ');
 $np->nagios_exit($exit_code, $exit_message);
