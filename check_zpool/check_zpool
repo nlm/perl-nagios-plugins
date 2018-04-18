@@ -20,9 +20,9 @@ use 5.008.009;
 use strict;
 use warnings;
 #use lib '/usr/lib/nagios/plugins/lib';
-use Nagios::Plugin;
+use Monitoring::Plugin;
 
-my $np = Nagios::Plugin->new(
+my $np = Monitoring::Plugin->new(
 	shortname => 'ZPOOL',
 	usage => "usage: check_zpool [-p <pool_name>] [-w %warning] [-c %critical]",
 	plugin => 'ZPOOL',
@@ -73,10 +73,10 @@ die "malformed pool name" if ($pool !~ /^[a-z0-9-_:.]$/i);
 
 foreach (`LANG=C zpool list -H $pool`)
 {
-	if (/^(\S+)\s+(\S+)\s+(\S+)\s+(\S+)\s+(\S+)%\s+(\S+)x\s+(\S+)\s+(\S+)$/)
+	if (/^(\S+)\s+(\S+)\s+(\S+)\s+(\S+)\s+(\S+)\s+(\S+)%\s+(\S+)%\s+(\S+)x\s+(\S+)\s+(\S+)$/)
 	{
 		print if $np->opts->verbose > 2;
-		my ($pool_name, $size, $alloc, $free, $cap, $dedus, $health, $altroot) = ($1, $2, $3, $4, $5, $6, $7, $8);
+		my ($pool_name, $size, $alloc, $free, $expanz, $frag, $cap, $dedus, $health, $altroot) = ($1, $2, $3, $4,$5, $6, $7, $8, $9, $10);
 		my $code = $np->check_threshold(
 			check => $cap,
 			warning => $np->opts->warning,
